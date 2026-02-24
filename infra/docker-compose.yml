@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: unknown_db
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=unknown_vault
+      - POSTGRES_DB=market_high_freq
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: unknown_cache
+    ports:
+      - "6379:6379"
+    restart: unless-stopped

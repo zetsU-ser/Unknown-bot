@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+
+# Environment variables (¡NUNCA SUBIR CREDENCIALES!)
+.env
+.env.local
+
+# Logs and databases
+*.log
+bot_activity.log
+*.sqlite3
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
