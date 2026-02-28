@@ -1,41 +1,60 @@
 import ccxt
 import polars as pl
 import time
-from core.config import DB_URL, TRADING_SYMBOL, TIMEFRAME
-from core.logger import bot_log
 
-def download_month_data():
-    exchange = ccxt.binance()
+# Asegúrate de importar las variables correctas desde tu config
+from configs.btc_usdt_config import DB_URL, SYMBOL, TF_SNIPER
+# Si tienes un logger úsalo, si no, usaremos prints para ver el progreso
+# from core.logger import bot_log 
+
+def download_historical_data():
+    # Inicializamos Binance activando el Rate Limit nativo para que no nos baneen
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+    })
     all_ohlcv = []
     
-    # Calculamos el timestamp de hace 30 días en milisegundos
-    since = exchange.milliseconds() - (200000 * 60 * 1000)
+    # ── CAMBIO 1: FECHA DE INICIO EXACTA ──
+    # Descargamos desde el 1 de Enero de 2025 (Más de un año entero de velas 1m)
+    since = exchange.parse8601('2025-01-01T00:00:00Z')
     
-    bot_log.info(f"Iniciando descarga masiva de {TRADING_SYMBOL}...")
+    print(f"Iniciando descarga masiva de {SYMBOL} desde 2025...")
 
     while since < exchange.milliseconds():
-        # Bajamos de a 1000 velas (límite de Binance)
-        symbol = TRADING_SYMBOL.replace("/", "") # CCXT usa BTCUSDT para histórico a veces
-        new_data = exchange.fetch_ohlcv(TRADING_SYMBOL, TIMEFRAME, since=since, limit=1000)
-        
-        if not new_data:
-            break
+        try:
+            # Pedimos de a 1000 velas
+            new_data = exchange.fetch_ohlcv(SYMBOL, TF_SNIPER, since=since, limit=1000)
             
-        all_ohlcv.extend(new_data)
-        # El nuevo 'since' es el timestamp de la última vela recibida + 1ms
-        since = new_data[-1][0] + 1
-        
-        print(f"[*] Descargadas {len(all_ohlcv)} velas...", end="\r")
-        time.sleep(0.1) # Respetar rate limit
+            if not new_data:
+                break
+                
+            all_ohlcv.extend(new_data)
+            # Avanzamos el reloj al timestamp de la última vela + 1 milisegundo
+            since = new_data[-1][0] + 1
+            
+            print(f"[*] Descargadas {len(all_ohlcv)} velas...", end="\r")
+            time.sleep(0.1) # Respeto al servidor de Binance
+            
+        except Exception as e:
+            # Si Binance nos corta la conexión, pausamos y reintentamos
+            print(f"\n[!] Error de red: {e}. Reintentando en 5 segundos...")
+            time.sleep(5)
 
-    # Convertir a DataFrame y guardar
+    print("\n[*] Descarga completa. Procesando datos vectoriales en Polars...")
     df = pl.DataFrame(all_ohlcv, schema=["timestamp", "open", "high", "low", "close", "volume"], orient="row")
+    
+    # Convertimos los milisegundos a fecha legible (TIMESTAMP)
     df = df.with_columns(pl.from_epoch("timestamp", time_unit="ms"))
     
-    table_name = TRADING_SYMBOL.replace("/", "_").lower()
-    df.write_database(table_name=table_name, connection=DB_URL, if_table_exists="replace")
+    # Nombre exacto de la tabla en PostgreSQL
+    table_name = "btc_usdt" 
     
-    bot_log.info(f"¡ÉXITO! {len(all_ohlcv)} velas guardadas en la DB.")
+    print(f"[*] Inyectando motor en la Hipertabla de TimescaleDB...")
+    # ── CAMBIO 2: APPEND EN LUGAR DE REPLACE ──
+    # 'append' inyecta la data respetando la estructura particionada
+    df.write_database(table_name=table_name, connection=DB_URL, if_table_exists="append")
+    
+    print(f"¡ÉXITO! {len(all_ohlcv)} velas de 1 minuto guardadas en la DB.")
 
 if __name__ == "__main__":
-    download_month_data()
+    download_historical_data()

@@ -1,89 +1,109 @@
+# analysis/volume_profile.py — V10.2
 """
-Bloque 3: Análisis de Volumen (Smart Money Footprint) - UNKNOWN-BOT V9.0
-========================================================================
-Cálculo de VWAP Institucional y Cumulative Volume Delta (CVD).
-Convierte el volumen bruto en huellas de agresión compradora/vendedora.
-"""
+Bloque 3: Volumen Institucional — CVD + Perfil de Volumen
+=========================================================
 
+Funciones:
+  enrich_with_volume_features(df) → añade columna 'cvd' al DataFrame
+  detect_volume_divergence(df, lookback) → detecta divergencias CVD/precio
+
+CVD (Cumulative Volume Delta):
+  Aproximación del flujo de órdenes neto (compra vs venta).
+  Si cierre > apertura → barra alcista → delta = +volume
+  Si cierre < apertura → barra bajista → delta = -volume
+  CVD = suma acumulada del delta → proxy de presión compradora/vendedora
+
+Bloque 6 (Arquitectura):
+  Esta versión es la implementación vectorizada para backtesting/research.
+  En producción real se usaría tick data o trades individuales de la API
+  para calcular el CVD real (buy_qty - sell_qty por trade).
+"""
+import numpy as np
 import polars as pl
 
-def calculate_vwap(df: pl.DataFrame) -> pl.Series:
-    """
-    Calcula el VWAP (Volume Weighted Average Price) acumulado.
-    Es el verdadero precio promedio pagado por el mercado, ponderado por el dinero real.
-    """
-    # Typical Price = (High + Low + Close) / 3
-    tp = (df["high"] + df["low"] + df["close"]) / 3.0
-    
-    # TPV = Precio Típico * Volumen
-    tpv = tp * df["volume"]
-    
-    # VWAP = Suma Acumulada(TPV) / Suma Acumulada(Volumen)
-    vwap = tpv.cum_sum() / df["volume"].cum_sum()
-    
-    return vwap
 
-def calculate_cvd(df: pl.DataFrame) -> pl.Series:
-    """
-    Estima el CVD (Cumulative Volume Delta) usando la anatomía de la vela.
-    Mide la "Agresión" (quién tiene el control: compradores o vendedores).
-    """
-    high = df["high"]
-    low = df["low"]
-    open_p = df["open"]
-    close_p = df["close"]
-    vol = df["volume"]
-    
-    # Rango total de la vela
-    rango = high - low
-    
-    # Evitar división por cero en velas sin movimiento (Dojis perfectos)
-    rango = pl.when(rango == 0).then(0.00001).otherwise(rango)
-    
-    # Fórmula Quant de Delta Estimado:
-    # Delta = Volumen * ((Close - Open) / Rango)
-    # Si cierra exactamente en el máximo, es 100% volumen de agresión compradora.
-    # Si cierra en el mínimo, es -100% volumen vendedor.
-    delta = vol * ((close_p - open_p) / rango)
-    
-    # CVD es la suma acumulada de ese Delta para ver la tendencia de la presión
-    cvd = delta.cum_sum()
-    
-    return cvd
-
+# ─────────────────────────────────────────────────────────────────────────────
 def enrich_with_volume_features(df: pl.DataFrame) -> pl.DataFrame:
     """
-    Inyecta las métricas institucionales de volumen al DataFrame.
-    Esta función se llamará durante la fase de ETL/Carga de datos.
+    Añade el CVD (Cumulative Volume Delta) al DataFrame.
+
+    El CVD es la columna más importante del Bloque 3 para detectar:
+    - Divergencias bajistas: precio sube, CVD baja → institucionales distribuyendo
+    - Divergencias alcistas: precio baja, CVD sube → institucionales acumulando
+
+    Args:
+        df: DataFrame con columnas open, close, volume
+
+    Returns:
+        df enriquecido con columna 'cvd'
     """
-    if "volume" not in df.columns or len(df) == 0:
-        return df
-        
-    return df.with_columns([
-        calculate_vwap(df).alias("vwap"),
-        calculate_cvd(df).alias("cvd")
-    ])
+    if "cvd" in df.columns:
+        return df   # Ya enriquecido
 
-# Añade esto al final de analysis/volume_profile.py
+    if len(df) == 0:
+        return df.with_columns(pl.lit(0.0).alias("cvd"))
 
+    closes   = df["close"].to_numpy().astype(np.float64)
+    opens    = df["open"].to_numpy().astype(np.float64)
+    volumes  = df["volume"].to_numpy().astype(np.float64)
+
+    # Delta de volumen por barra
+    # +volume si barra alcista, -volume si barra bajista
+    delta = np.where(closes >= opens, volumes, -volumes)
+
+    # CVD = suma acumulada del delta
+    cvd = np.cumsum(delta)
+
+    return df.with_columns(pl.Series("cvd", cvd))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 def detect_volume_divergence(df: pl.DataFrame, lookback: int = 10) -> str:
     """
-    Analiza la relación entre el Precio y el CVD para detectar trampas.
-    Lookback: 10 velas de 1m (micro-estructura).
-    """
-    if len(df) < lookback: return "NORMAL"
-    
-    recent = df.tail(lookback)
-    price_change = recent["close"][-1] - recent["close"][0]
-    cvd_change = recent["cvd"][-1] - recent["cvd"][0]
-    
-    # 🐻 BEARISH DIVERGENCE: El precio sube pero el CVD baja (Ventas pasivas absorbiendo)
-    if price_change > 0 and cvd_change < 0:
-        return "BEAR_DIV"
-    
-    # 🐂 BULLISH DIVERGENCE: El precio baja pero el CVD sube (Compras pasivas acumulando)
-    if price_change < 0 and cvd_change > 0:
-        return "BULL_DIV"
-        
-    return "NORMAL"
+    Detecta divergencias entre el precio y el CVD (Bloque 3 — Trampa de Volumen).
 
+    Tipos:
+      BULL_DIV: precio hace mínimos más bajos pero CVD hace mínimos más altos
+                → institucionales comprando en la caída → setup LONG favorecido
+      BEAR_DIV: precio hace máximos más altos pero CVD hace máximos más bajos
+                → institucionales distribuyendo → setup SHORT favorecido
+      NEUTRAL:  sin divergencia clara
+
+    Args:
+        df:       DataFrame con columnas close, cvd
+        lookback: ventana de barras para comparar (default 10)
+
+    Returns:
+        "BULL_DIV" | "BEAR_DIV" | "NEUTRAL"
+    """
+    if len(df) < lookback * 2 + 1:
+        return "NEUTRAL"
+
+    if "cvd" not in df.columns:
+        return "NEUTRAL"
+
+    window = df.tail(lookback * 2)
+    closes = window["close"].to_numpy().astype(np.float64)
+    cvds   = window["cvd"].to_numpy().astype(np.float64)
+
+    # Dividir en mitad anterior vs mitad reciente
+    mid = lookback
+    prev_close_max = np.max(closes[:mid])
+    curr_close_max = np.max(closes[mid:])
+    prev_close_min = np.min(closes[:mid])
+    curr_close_min = np.min(closes[mid:])
+
+    prev_cvd_max   = np.max(cvds[:mid])
+    curr_cvd_max   = np.max(cvds[mid:])
+    prev_cvd_min   = np.min(cvds[:mid])
+    curr_cvd_min   = np.min(cvds[mid:])
+
+    # BEAR_DIV: precio HH pero CVD LH → distribución institucional
+    if curr_close_max > prev_close_max and curr_cvd_max < prev_cvd_max:
+        return "BEAR_DIV"
+
+    # BULL_DIV: precio LL pero CVD HL → acumulación institucional
+    if curr_close_min < prev_close_min and curr_cvd_min > prev_cvd_min:
+        return "BULL_DIV"
+
+    return "NEUTRAL"
