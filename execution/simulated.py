@@ -1,57 +1,63 @@
-# execution/simulated.py — V10.2
-"""
-PaperWallet legacy — usado por main.py viejo y compatibilidad backward.
-V10.2: eliminada dependencia de core.logger (que no existe).
-      Usa logging estándar de Python.
-"""
-import logging
+import requests
 import configs.btc_usdt_config as config
+from infra.binance_client import BinanceClientFactory
 
-log = logging.getLogger("simulated")
+# ── ESTÉTICA ─────────────────────────────────────────────────────────────────
+GREEN, RED, CYAN, YELLOW, RESET = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[0m"
 
+class ZetsuExecutor:
+    def __init__(self, use_testnet=True):
+        print(f"{CYAN}[*] Inicializando Brazo Ejecutor de Zetsu (Testnet: {use_testnet})...{RESET}")
+        self.exchange = BinanceClientFactory.create(testnet=use_testnet)
+        try:
+            self.exchange.load_markets()
+        except Exception as e:
+            print(f"{RED}[!] Aviso: No se pudieron cargar los mercados. {e}{RESET}")
 
-class PaperWallet:
-    def __init__(self):
-        self.cash          = config.INITIAL_CASH
-        self.crypto        = 0.0
-        self.active_trade  = False
-        self.buy_price     = 0.0
-        self.max_price     = 0.0
-        self.bars_in_trade = 0
+    def calculate_position_size(self, entry_price, sl_price, usdt_balance):
+        risk_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.02)
+        capital_at_risk = usdt_balance * risk_pct
+        sl_distance = abs(entry_price - sl_price)
+        if sl_distance == 0: return 0
+        qty_btc = capital_at_risk / sl_distance
+        return round(qty_btc, 4)
 
-    def execute_trade(
-        self,
-        signal: str,
-        current_price: float,
-        reason: str | None = None,
-    ) -> tuple[float, float]:
+    def execute_signal(self, direction, entry_price, sl_price, tp_price, tier):
+        print(f"\n{YELLOW}[⚙️] Zetsu está armando el paquete de ejecución institucional...{RESET}")
+        try:
+            balance = self.exchange.fetch_balance()
+            usdt_balance = balance['total'].get('USDT', 0.0)
+            
+            if usdt_balance < 10:
+                print(f"{RED}[X] Fuego Abortado: Balance insuficiente.{RESET}")
+                return False
 
-        if signal == "BUY" and not self.active_trade:
-            self.crypto        = self.cash / current_price
-            self.buy_price     = current_price
-            self.max_price     = current_price
-            self.bars_in_trade = 0
-            self.cash          = 0.0
-            self.active_trade  = True
-            log.warning(f"COMPRA SIMULADA: {self.crypto:.6f} BTC @ ${current_price:.2f}")
+            qty = self.calculate_position_size(entry_price, sl_price, usdt_balance)
+            notional = qty * entry_price
+            
+            if notional < 5:
+                print(f"{RED}[X] Fuego Abortado: Tamaño de posición menor al mínimo.{RESET}")
+                return False
 
-        elif signal == "SELL" and self.active_trade:
-            self.cash          = self.crypto * current_price
-            pnl_pct            = (current_price / self.buy_price - 1) * 100
-            reason_str         = f" | Razón: {reason}" if reason else ""
-            log.warning(f"VENTA SIMULADA: ${self.cash:.2f} | PnL: {pnl_pct:+.2f}%{reason_str}")
-            self.crypto        = 0.0
-            self.active_trade  = False
-            self.buy_price     = 0.0
-            self.max_price     = 0.0
-            self.bars_in_trade = 0
+            side = 'buy' if direction == 'LONG' else 'sell'
+            
+            # ── ALERTA DIRECTA A DISCORD ──
+            webhook_url = "https://discord.com/api/webhooks/1477518249972465795/MWLQWl7m4i_vmi1sHDyJZQyGtjxfQcaXJpo-shuw-IgZq8BdPgjOrp7qX-tdF27evdO8"
+            
+            discord_msg = {
+                "content": f"🚨 **ZETSU HUNT: TRADE DETECTADO** 🚨\n**Dirección:** {direction} | **Tier:** {tier}\n```text\nEntry: {entry_price:,.2f}\nTP: {tp_price:,.2f}\nSL: {sl_price:,.2f}\n```"
+            }
+            
+            try:
+                requests.post(webhook_url, json=discord_msg)
+            except Exception as e:
+                print(f"{RED}[!] Error enviando a Discord: {e}{RESET}")
 
-        elif self.active_trade:
-            self.bars_in_trade += 1
-            if current_price > self.max_price:
-                self.max_price = current_price
+            # Print básico en consola para saber que disparó
+            print(f"{GREEN}[✓] ORDEN ENVIADA - REVISA DISCORD{RESET}\n")
+            
+            return True
 
-        return self.cash, self.crypto
-
-
-wallet = PaperWallet()
+        except Exception as e:
+            print(f"{RED}[!] Error Crítico de Ejecución: {e}{RESET}")
+            return False

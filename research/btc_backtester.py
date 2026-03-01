@@ -42,6 +42,10 @@ def load_and_sync_data():
     df_1m = pl.read_database_uri(
         "SELECT * FROM btc_usdt ORDER BY timestamp ASC", uri=config.DB_URL
     )
+    
+    # ➔ CAMBIO CRÍTICO: Filtro de desinfección para eliminar basura duplicada
+    df_1m = df_1m.unique(subset=["timestamp"], keep="last").sort("timestamp")
+    
     df_1m = add_indicators(df_1m)
 
     print(f"{CYAN}  [2/3] Construyendo capas Estructura (15m), Momentum (1h), Swing (4h) y Macro (1d)...{RESET}")

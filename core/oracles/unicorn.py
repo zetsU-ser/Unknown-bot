@@ -22,9 +22,7 @@ class UnicornOracle:
         self.W_RSI_EXTREME   =  7.0
 
     def probability(self, c1m, c15m, c1h, direction, ctx):
-        bos_choch = ctx["bos_choch"]
-        sweep     = ctx["sweep"]
-        eqh_eql   = ctx["eqh_eql"]
+        bos_choch, sweep, eqh_eql = ctx["bos_choch"], ctx["sweep"], ctx["eqh_eql"]
 
         has_choch   = (bos_choch["choch"] and bos_choch["direction"] == ("BULL" if direction == "LONG" else "BEAR"))
         has_sfp_eql = (direction == "LONG"  and sweep["sweep"] and sweep["direction"] == "BULL" and eqh_eql["eql_swept"])
@@ -36,22 +34,21 @@ class UnicornOracle:
 
         prob = (self.BASE_CHOCH if has_choch else self.BASE_SFP_EQL if (has_sfp_eql or has_sfp_eqh) else self.BASE_SFP_BASIC)
 
-        zone_15m  = ctx["zone_15m"]
-        zone_1h   = ctx["zone_1h"]
-        pd_ok_15m = (direction == "LONG"  and zone_15m == "DISCOUNT") or (direction == "SHORT" and zone_15m == "PREMIUM")
-        pd_ok_1h  = (direction == "LONG"  and zone_1h  == "DISCOUNT") or (direction == "SHORT" and zone_1h  == "PREMIUM")
-        if pd_ok_15m and pd_ok_1h:    prob += self.W_PD_BOTH_TF
-        elif pd_ok_15m:               prob += self.W_PD_ONE_TF
-        else:                         prob += self.W_PD_ADVERSE
+        zone_15m, zone_1h = ctx["zone_15m"], ctx["zone_1h"]
+        pd_ok_15m = (direction == "LONG" and zone_15m == "DISCOUNT") or (direction == "SHORT" and zone_15m == "PREMIUM")
+        pd_ok_1h  = (direction == "LONG" and zone_1h  == "DISCOUNT") or (direction == "SHORT" and zone_1h  == "PREMIUM")
+        
+        if pd_ok_15m and pd_ok_1h: prob += self.W_PD_BOTH_TF
+        elif pd_ok_15m:            prob += self.W_PD_ONE_TF
+        else:                      prob += self.W_PD_ADVERSE
 
-        # ── REFACTORIZACIÓN CONFIG (Flujo Macro CVD Exclusivo Unicornio) ──
         cvd_15m = c15m.get("cvd", 0) or 0
         if direction == "LONG":
-            if cvd_15m > config.UNICORN_CVD15M_ALIGNED: prob += self.W_CVD15M_OK
-            elif cvd_15m < config.UNICORN_CVD15M_BLOCK: prob += self.W_CVD15M_BLOCK
+            if cvd_15m > getattr(config, "UNICORN_CVD15M_ALIGNED", -48000): prob += self.W_CVD15M_OK
+            elif cvd_15m < getattr(config, "UNICORN_CVD15M_BLOCK", -60000): prob += self.W_CVD15M_BLOCK
         else:
-            if cvd_15m < abs(config.UNICORN_CVD15M_ALIGNED): prob += self.W_CVD15M_OK
-            elif cvd_15m > abs(config.UNICORN_CVD15M_BLOCK): prob += self.W_CVD15M_BLOCK
+            if cvd_15m < abs(getattr(config, "UNICORN_CVD15M_ALIGNED", -48000)): prob += self.W_CVD15M_OK
+            elif cvd_15m > abs(getattr(config, "UNICORN_CVD15M_BLOCK", -60000)): prob += self.W_CVD15M_BLOCK
             
         if prob <= 0: return 0.0
 
@@ -66,8 +63,7 @@ class UnicornOracle:
         if direction == "LONG"  and eqh_eql["eql_swept"]: prob += self.W_EQL_SWEPT
         if direction == "SHORT" and eqh_eql["eqh_swept"]: prob += self.W_EQH_SWEPT
 
-        t1h  = ctx["trend_1h"]
-        t15m = ctx["trend_15m"]
+        t1h, t15m = ctx["trend_1h"], ctx["trend_15m"]
         if direction == "LONG":
             if t1h  == "BULLISH": prob += self.W_TREND_1H
             elif t1h == "BEARISH": prob += self.W_TREND_CONTRA
@@ -77,19 +73,18 @@ class UnicornOracle:
             elif t1h == "BULLISH": prob += self.W_TREND_CONTRA
             if t15m == "BEARISH": prob += self.W_TREND_15M
 
-        # ── REFACTORIZACIÓN CONFIG (Flujo Micro CVD) ──
         cvd_1m = c1m.get("cvd", 0) or 0
+        cvd1m_thresh = getattr(config, "CVD_1M_CONTRA_THRESHOLD", -15000)
         if direction == "LONG":
-            if cvd_1m  > (config.CVD_1M_CONTRA_THRESHOLD / 1.5): prob += self.W_CVD1M_OK
-            elif cvd_1m < config.CVD_1M_CONTRA_THRESHOLD:        prob += self.W_CVD1M_CONTRA
+            if cvd_1m  > (cvd1m_thresh / 1.5): prob += self.W_CVD1M_OK
+            elif cvd_1m < cvd1m_thresh:        prob += self.W_CVD1M_CONTRA
         else:
-            if cvd_1m  < abs(config.CVD_1M_CONTRA_THRESHOLD / 1.5): prob += self.W_CVD1M_OK
-            elif cvd_1m > abs(config.CVD_1M_CONTRA_THRESHOLD):      prob += self.W_CVD1M_CONTRA
+            if cvd_1m  < abs(cvd1m_thresh / 1.5): prob += self.W_CVD1M_OK
+            elif cvd_1m > abs(cvd1m_thresh):      prob += self.W_CVD1M_CONTRA
 
-        # ── REFACTORIZACIÓN CONFIG (RSI Extremo) ──
         rsi = c1m.get("rsi", 50) or 50
-        rsi_extreme_ob = 100 - config.UNICORN_RSI_EXTREME
-        if direction == "LONG"  and rsi < config.UNICORN_RSI_EXTREME: prob += self.W_RSI_EXTREME
-        if direction == "SHORT" and rsi > rsi_extreme_ob:             prob += self.W_RSI_EXTREME
+        rsi_extreme_ob = 100 - getattr(config, "UNICORN_RSI_EXTREME", 30)
+        if direction == "LONG"  and rsi < getattr(config, "UNICORN_RSI_EXTREME", 30): prob += self.W_RSI_EXTREME
+        if direction == "SHORT" and rsi > rsi_extreme_ob:                             prob += self.W_RSI_EXTREME
 
         return max(0.0, min(prob, 100.0))
