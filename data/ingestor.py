@@ -14,12 +14,15 @@ from analysis.indicators import add_indicators
 from analysis.volume_profile import enrich_with_volume_features
 from core.decision_engine import check_mtf_signals
 from execution.simulated import ZetsuExecutor
+from dotenv import load_dotenv
+
+load_dotenv()
+
+WEBHOOK_DISCORD = os.getenv("DISCORD_WEBHOOK")
+
 
 # ── ESTÉTICA ─────────────────────────────────────────────────────────────────
 GREEN, RED, CYAN, YELLOW, RESET, MAGENTA = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[0m", "\033[95m"
-
-# ── CONFIGURACIÓN DE DISCORD ─────────────────────────────────────────────────
-WEBHOOK_DISCORD = "https://discord.com/api/webhooks/1477518249972465795/MWLQWl7m4i_vmi1sHDyJZQyGtjxfQcaXJpo-shuw-IgZq8BdPgjOrp7qX-tdF27evdO8"
 
 # ── INICIALIZACIÓN DEL BRAZO EJECUTOR ────────────────────────────────────────
 executor = ZetsuExecutor(use_testnet=True)

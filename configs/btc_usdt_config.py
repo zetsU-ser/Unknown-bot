@@ -1,13 +1,16 @@
 import os
+from dotenv import load_dotenv
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bot_activity.log")
 
-DB_USER = "admin"
-DB_PASS = "unknown_vault"
+load_dotenv()
+DB_USER = os.getenv("DB_USER", "admin")
+DB_PASS = os.getenv("DB_PASS", "password_segura")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = "market_high_freq"
-DB_HOST = "localhost"
-DB_PORT = "5432"
 DB_URL  = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 
 SYMBOL         = "BTC/USDT"
 EXCHANGE_ID    = "binance"
