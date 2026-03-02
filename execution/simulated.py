@@ -22,7 +22,7 @@ class ZetsuExecutor:
         qty_btc = capital_at_risk / sl_distance
         return round(qty_btc, 4)
 
-    def execute_signal(self, direction, entry_price, sl_price, tp_price, tier):
+    def execute_signal(self, direction, entry_price, sl_price, tp_price, tier, prob=0.0):
         print(f"\n{YELLOW}[⚙️] Zetsu está armando el paquete de ejecución institucional...{RESET}")
         try:
             balance = self.exchange.fetch_balance()
@@ -41,9 +41,9 @@ class ZetsuExecutor:
 
             side = 'buy' if direction == 'LONG' else 'sell'
             
-            # ── ALERTA DIRECTA A DISCORD (Lectura Robusta) ──
+            # ── ALERTA DIRECTA A DISCORD (Ahora con % de Certeza) ──
             discord_msg = {
-                "content": f"🚨 **ZETSU HUNT: TRADE DETECTADO** 🚨\n**Dirección:** {direction} | **Tier:** {tier}\n```text\nEntry: {entry_price:,.2f}\nTP: {tp_price:,.2f}\nSL: {sl_price:,.2f}\n```"
+                "content": f"🚨 **ZETSU HUNT: TRADE DETECTADO** 🚨\n**Dirección:** {direction} | **Tier:** {tier} | **Certeza:** {prob:.1f}%\n```text\nEntry: {entry_price:,.2f}\nTP: {tp_price:,.2f}\nSL: {sl_price:,.2f}\n```"
             }
             
             try:
