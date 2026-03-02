@@ -32,10 +32,11 @@ def run_download():
     print(f"{CYAN}[*] Inicializando Extractor de Datos Históricos...{RESET}")
     try:
         import data.history_downloader
-        # data.history_downloader.run()
-        print(f"{YELLOW}[!] Módulo de descarga invocado.{RESET}")
+        data.history_downloader.run() # <- Ya no está comentado
     except KeyboardInterrupt:
         print(f"\n{RED}[!] Descarga de datos cancelada.{RESET}")
+    except AttributeError:
+        print(f"\n{RED}[!] Error: No se encontró la función 'run()' en history_downloader.py. Verifica el nombre exacto de la función principal allí.{RESET}")
 
 def interactive_menu():
     while True:

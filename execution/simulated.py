@@ -41,21 +41,20 @@ class ZetsuExecutor:
 
             side = 'buy' if direction == 'LONG' else 'sell'
             
-            # ── ALERTA DIRECTA A DISCORD ──
-            webhook_url = "https://discord.com/api/webhooks/1477518249972465795/MWLQWl7m4i_vmi1sHDyJZQyGtjxfQcaXJpo-shuw-IgZq8BdPgjOrp7qX-tdF27evdO8"
-            
+            # ── ALERTA DIRECTA A DISCORD (Lectura Robusta) ──
             discord_msg = {
                 "content": f"🚨 **ZETSU HUNT: TRADE DETECTADO** 🚨\n**Dirección:** {direction} | **Tier:** {tier}\n```text\nEntry: {entry_price:,.2f}\nTP: {tp_price:,.2f}\nSL: {sl_price:,.2f}\n```"
             }
             
             try:
-                requests.post(webhook_url, json=discord_msg)
+                if config.WEBHOOK_DISCORD:
+                    requests.post(config.WEBHOOK_DISCORD, json=discord_msg)
+                else:
+                    print(f"{YELLOW}[!] Alerta generada, pero no hay Webhook configurado en .env{RESET}")
             except Exception as e:
                 print(f"{RED}[!] Error enviando a Discord: {e}{RESET}")
 
-            # Print básico en consola para saber que disparó
             print(f"{GREEN}[✓] ORDEN ENVIADA - REVISA DISCORD{RESET}\n")
-            
             return True
 
         except Exception as e:

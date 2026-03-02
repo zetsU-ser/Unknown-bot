@@ -2,24 +2,14 @@ import json
 import websocket
 import datetime
 import polars as pl
-import sys
-import os
 import requests
 
-# Aseguramos que Python encuentre tus módulos
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# ── IMPORTACIONES LIMPIAS (Cero parches de sys.path) ───────────────
 import configs.btc_usdt_config as config
 from analysis.indicators import add_indicators
 from analysis.volume_profile import enrich_with_volume_features
 from core.decision_engine import check_mtf_signals
 from execution.simulated import ZetsuExecutor
-from dotenv import load_dotenv
-
-load_dotenv()
-
-WEBHOOK_DISCORD = os.getenv("DISCORD_WEBHOOK")
-
 
 # ── ESTÉTICA ─────────────────────────────────────────────────────────────────
 GREEN, RED, CYAN, YELLOW, RESET, MAGENTA = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[0m", "\033[95m"
@@ -144,11 +134,12 @@ def on_open(ws):
     print(f"║{'INGESTOR V10.2 — CAZADOR AUTÓNOMO EN LÍNEA':^56}║")
     print(f"╚{'═'*56}╝{RESET}\n")
 
-    # ── EL GRITO DE ENCENDIDO A DISCORD ──
+    # ── EL GRITO DE ENCENDIDO A DISCORD (Usando config central) ──
     try:
         msg = {"content": "🟢 **ZETSU HUNT EN LÍNEA**\nEl Nervio Óptico está conectado a la Matrix. Cazando..."}
-        requests.post(WEBHOOK_DISCORD, json=msg)
-        print(f"{GREEN}[✓] Ping de inicio enviado al Discord exitosamente.{RESET}")
+        if config.WEBHOOK_DISCORD:
+            requests.post(config.WEBHOOK_DISCORD, json=msg)
+            print(f"{GREEN}[✓] Ping de inicio enviado al Discord exitosamente.{RESET}")
     except Exception as e:
         print(f"{RED}[!] Error enviando el ping a Discord: {e}{RESET}")
 

@@ -4,13 +4,14 @@ from dotenv import load_dotenv
 LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bot_activity.log")
 
 load_dotenv()
-DB_USER = os.getenv("DB_USER", "admin")
-DB_PASS = os.getenv("DB_PASS", "password_segura")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASS")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 DB_NAME = "market_high_freq"
 DB_URL  = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
+WEBHOOK_DISCORD = os.getenv("DISCORD_WEBHOOK")
 
 SYMBOL         = "BTC/USDT"
 EXCHANGE_ID    = "binance"
@@ -39,7 +40,7 @@ ADX_MIN_TREND   = 15
 ADX_STRONG      = 25
 
 USE_STRUCTURE_LEVELS = True
-ATR_SL_MULT          = 2.142
+ATR_SL_MULT          = 1.871  #<--anteriormente 2142
 ATR_TP_MULT          = 0.65
 
 SCOUT_RR_MIN    = 1.50
@@ -50,16 +51,16 @@ UNICORN_RR_MIN  = 2.50
 UNICORN_RR_MAX  = 5.00
 RR_MIN_REQUIRED = SCOUT_RR_MIN
 
-SCOUT_PROB_MIN  = 66.439
-AMBUSH_PROB_MIN = 81.027
-UNICORN_PROB_MIN= 88.020
+SCOUT_PROB_MIN  = 69.603 #<--66.439
+AMBUSH_PROB_MIN = 81.836 #<--81.027
+UNICORN_PROB_MIN= 90.333 #<--88.020
 
 SCOUT_MULT   = 1.0
 AMBUSH_MULT  = 1.25
 UNICORN_MULT = 3.0
 
-SCOUT_BE_THRESHOLD   = 0.645
-AMBUSH_BE_THRESHOLD  = 0.621
+SCOUT_BE_THRESHOLD   = 0.770 #<--0.645
+AMBUSH_BE_THRESHOLD  = 0.698 #<--0.621
 UNICORN_BE_THRESHOLD = 0.95
 
 SCOUT_PROFIT_LOCK   = 0.00
