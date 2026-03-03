@@ -5,19 +5,27 @@ import polars as pl
 import requests
 import sys
 import io
+from typing import Optional
 
 # ── IMPORTACIONES LIMPIAS ────────────────────────────────────────────────────
 import configs.btc_usdt_config as config
 from analysis.indicators import add_indicators
 from analysis.volume_profile import enrich_with_volume_features
-from core.decision_engine import check_mtf_signals
-from execution.simulated import ZetsuExecutor
+
+from engine.event_bus import EventBus
+from engine.orchestrator import ZetsuOrchestrator
+from domain.events import MTFDataEvent, SignalEvent, OrderEvent
+from domain.trading import Signal
 
 # ── ESTÉTICA ─────────────────────────────────────────────────────────────────
 GREEN, RED, CYAN, YELLOW, RESET, MAGENTA = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[0m", "\033[95m"
 
-# ── INICIALIZACIÓN DEL BRAZO EJECUTOR ────────────────────────────────────────
-executor = ZetsuExecutor(use_testnet=True)
+# ── BUS / ORQUESTADOR (INYECCIÓN) ───────────────────────────────────────────
+_orchestrator: Optional[ZetsuOrchestrator] = None
+_bus: Optional[EventBus] = None
+
+# Referencia al payload en evaluación (para leer barriers dentro de handlers)
+_current_eval_data: Optional[dict] = None
 
 # ── ESTADO GLOBAL DEL TABLERO TÁCTICO ────────────────────────────────────────
 class DashboardState:
@@ -35,9 +43,8 @@ def render_dashboard():
     """Dibuja y actualiza el tablero táctico en la misma posición de la consola"""
     uptime = datetime.datetime.now() - state.start_time
     uptime_str = str(uptime).split('.')[0]
-    
     reason_str = (state.last_reason[:42] + "...") if len(state.last_reason) > 45 else state.last_reason
-    
+
     lines = [
         f"{CYAN}╔════════════════════════════════════════════════════════╗{RESET}",
         f"  🟢 {GREEN}ZETSU HUNT LIVE DASHBOARD{RESET}",
@@ -50,22 +57,65 @@ def render_dashboard():
         f"  🧠 Estado IA        : {reason_str}",
         f"{CYAN}╚════════════════════════════════════════════════════════╝{RESET}"
     ]
-    
+
     if state.is_first_render:
         sys.stdout.write("\n" * len(lines))
         state.is_first_render = False
-        
+
     sys.stdout.write(f"\r\033[{len(lines)}A")
     for line in lines:
         sys.stdout.write(f"\033[K{line}\n")
     sys.stdout.flush()
 
+# ── HANDLERS EVENT-DRIVEN PARA DASHBOARD ─────────────────────────────────────
+def _handle_signal_event(event: SignalEvent) -> None:
+    """Alerta táctica cuando DecisionEngine publica una señal."""
+    global _current_eval_data
+    sig = event.signal
+    barriers = None
+    rr = 0.0
+
+    if isinstance(_current_eval_data, dict):
+        barriers = _current_eval_data.get("barriers")
+        if isinstance(barriers, dict):
+            rr = float(barriers.get("rr", 0.0))
+            barriers["tier"] = sig.tier
+
+    state.last_reason = f"ENTRY: {sig.tier} ({sig.prob:.1f}%)"
+    state.is_first_render = True
+
+    print(f"\n{MAGENTA}╔════════════════════════════════════════════════════════╗")
+    print(f"║ 🎯 ¡ALERTA DE FRANCOTIRADOR ZETSU! SEÑAL DETECTADA 🎯  ║")
+    print(f"╚════════════════════════════════════════════════════════╝{RESET}")
+    print(f"  🚀 DIRECCIÓN : {GREEN if sig.direction == 'LONG' else RED}{sig.direction}{RESET}")
+    print(f"  ⚔️  TIER      : {CYAN}{sig.tier}{RESET} (Prob: {sig.prob:.1f}%)")
+    if rr:
+        print(f"  ⚖️  RATIO R:R : {YELLOW}{rr:.2f}{RESET}")
+    print(f"  💥 ENTRY/SL/TP: {YELLOW}{sig.entry_price:,.2f}{RESET} / {RED}{sig.sl_price:,.2f}{RESET} / {GREEN}{sig.tp_price:,.2f}{RESET}")
+
+def _handle_order_event(event: OrderEvent) -> None:
+    """Contabiliza órdenes emitidas por OMS (PENDING)."""
+    state.trades_executed += 1
+
+def _ensure_bus(event_bus: Optional[EventBus] = None) -> EventBus:
+    """Inicializa bus/orquestador y suscripciones del ingestor."""
+    global _orchestrator, _bus
+    if event_bus is not None:
+        _bus = event_bus
+    else:
+        if _orchestrator is None:
+            _orchestrator = ZetsuOrchestrator()
+        _bus = _orchestrator.get_bus()
+    _bus.subscribe(SignalEvent, _handle_signal_event)
+    _bus.subscribe(OrderEvent, _handle_order_event)
+    return _bus
 
 def evaluate_live_market():
+    global _current_eval_data, _bus
     try:
         suppress_text = io.StringIO()
         sys.stdout = suppress_text
-        
+
         df_1m = pl.read_database_uri("SELECT * FROM btc_usdt ORDER BY timestamp ASC", uri=config.DB_URL)
         df_1m = df_1m.unique(subset=["timestamp"], keep="last").sort("timestamp")
         df_1m = add_indicators(df_1m)
@@ -106,42 +156,27 @@ def evaluate_live_market():
         slice_4h  = df_4h.tail(25)
         slice_1d  = df_1d.tail(15)
 
-        signal, reason, barriers, prob, direction = check_mtf_signals(
-            slice_1m, slice_15m, slice_1h, slice_4h, slice_1d, trade_state=None
-        )
-
         sys.stdout = sys.__stdout__
-        state.last_reason = reason
-        state.candles_analyzed += 1
+        if _bus is None:
+            _bus = _ensure_bus()
 
-        if signal == "ENTRY":
-            state.trades_executed += 1
-            tier = barriers.get("tier", "UNKNOWN")
-            rr = barriers.get("rr", 0)
-            
-            print(f"\n{MAGENTA}╔════════════════════════════════════════════════════════╗")
-            print(f"║ 🎯 ¡ALERTA DE FRANCOTIRADOR ZETSU! SEÑAL DETECTADA 🎯  ║")
-            print(f"╚════════════════════════════════════════════════════════╝{RESET}")
-            print(f"  🚀 DIRECCIÓN : {GREEN if direction == 'LONG' else RED}{direction}{RESET}")
-            print(f"  ⚔️  TIER      : {CYAN}{tier}{RESET} (Prob: {prob:.1f}%)")
-            print(f"  ⚖️  RATIO R:R : {YELLOW}{rr:.2f}{RESET}")
-            
-            entry_price = float(slice_1m["close"][-1])
-            executor.execute_signal(
-                direction=direction,
-                entry_price=entry_price,
-                sl_price=barriers['sl'],
-                tp_price=barriers['tp'],
-                tier=tier,
-                prob=prob
-            )
-            state.is_first_render = True
+        data_payload = {
+            "1m": slice_1m, "15m": slice_15m, "1h": slice_1h,
+            "4h": slice_4h, "1d": slice_1d, "trade_state": None
+        }
+
+        _current_eval_data = data_payload
+        _bus.publish(MTFDataEvent(data=data_payload))
+        _current_eval_data = None
+
+        state.last_reason = "NO_TRADE"
+        state.candles_analyzed += 1
 
     except Exception as e:
         sys.stdout = sys.__stdout__
         state.is_first_render = True
+        _current_eval_data = None
         print(f"\n{RED}[!] Error crítico en el análisis en vivo: {e}{RESET}")
-
 
 def on_message(ws, message):
     data = json.loads(message)
@@ -152,11 +187,7 @@ def on_message(ws, message):
     if is_closed:
         state.last_close = state.current_price
         timestamp_ms = data['E']
-        open_p  = float(kline['o'])
-        high_p  = float(kline['h'])
-        low_p   = float(kline['l'])
-        close_p = float(kline['c'])
-        volume  = float(kline['v'])
+        open_p, high_p, low_p, close_p, volume = float(kline['o']), float(kline['h']), float(kline['l']), float(kline['c']), float(kline['v'])
 
         df_new = pl.DataFrame({
             "timestamp": [timestamp_ms],
@@ -167,17 +198,13 @@ def on_message(ws, message):
         try:
             suppress_text = io.StringIO()
             sys.stdout = suppress_text
-            
             df_new.write_database(table_name="btc_usdt", connection=config.DB_URL, if_table_exists="append")
-            
             sys.stdout = sys.__stdout__
             evaluate_live_market()
-            
         except Exception as e:
             sys.stdout = sys.__stdout__
             state.is_first_render = True
             print(f"\n{RED}[!] Error crítico inyectando a la base de datos: {e}{RESET}")
-
     render_dashboard()
 
 def on_error(ws, error):
@@ -200,99 +227,58 @@ def on_open(ws):
     except Exception as e:
         print(f"{RED}[!] Error enviando el ping a Discord: {e}{RESET}")
 
-    print(f"{YELLOW}[⚙️] Forzando trade de simulación para verificar ejecución y Discord...{RESET}")
+    print(f"{YELLOW}[⚙️] Forzando trade de simulación para verificar OMS/Executor/SQLite...{RESET}")
     try:
-        df_test = pl.read_database_uri("SELECT close FROM btc_usdt ORDER BY timestamp DESC LIMIT 1", uri=config.DB_URL)
-        test_price = float(df_test["close"][0]) if len(df_test) > 0 else 65000.0
-        
-        executor.execute_signal(
-            direction="LONG",
-            entry_price=test_price,
-            sl_price=test_price * 0.98,
-            tp_price=test_price * 1.05,
-            tier="SIMULACRO_INICIAL",
-            prob=99.9
+        _ensure_bus()
+        now_ms = int(datetime.datetime.utcnow().timestamp() * 1000)
+        test_price = 65000.0
+        sig = Signal(
+            asset=config.SYMBOL, direction="LONG", entry_price=test_price,
+            sl_price=test_price * 0.98, tp_price=test_price * 1.05,
+            tier="SIMULACRO_INICIAL", prob=99.9, timestamp=now_ms
         )
+        _bus.publish(SignalEvent(signal=sig))
         print(f"{CYAN}[*] Simulacro completado. Iniciando Tablero Táctico...{RESET}\n")
     except Exception as e:
         print(f"{RED}[!] Error en el simulacro de inicio: {e}{RESET}")
 
-# ── MÓDULO DE CURACIÓN TEMPORAL (GAP FILLER) ─────────────────────────────────
 def sync_historical_gaps():
     print(f"\n{CYAN}[*] Iniciando Protocolo de Sincronización Temporal (Gap Filler)...{RESET}")
     try:
         query = "SELECT timestamp FROM btc_usdt ORDER BY timestamp DESC LIMIT 1"
         df_last = pl.read_database_uri(query, uri=config.DB_URL)
-
         if len(df_last) == 0:
             print(f"{YELLOW}[!] Base de datos vacía. Arrancando con memoria limpia.{RESET}")
             return
 
-        # Obtenemos el timestamp en milisegundos de la última vela en PostgreSQL
         last_ts_ms = int(df_last["timestamp"][0].timestamp() * 1000)
         current_ts_ms = int(datetime.datetime.now().timestamp() * 1000)
-
-        # Si pasaron menos de 2 minutos (120,000 ms), no hay nada que rellenar
         if current_ts_ms - last_ts_ms < 120_000:
             print(f"{GREEN}[✓] Memoria intacta. Sin ceguera temporal.{RESET}")
             return
 
         print(f"{YELLOW}[!] Ceguera temporal detectada. Descargando velas faltantes...{RESET}")
-        
         symbol = config.SYMBOL.replace("/", "").upper()
-        start_time = last_ts_ms + 60000 # Sumamos 1 minuto para no duplicar la última vela
-        total_filled = 0
-        
-        # Bucle robusto por si estuviste desconectado días enteros
+        start_time, total_filled = last_ts_ms + 60000, 0
+
         while True:
-            #url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={config.TF_SNIPER}&startTime={start_time}&limit=1000"
             url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={config.TF_SNIPER}&startTime={start_time}&limit=1000"
-            response = requests.get(url)
-            data = response.json()
-            
-            # Si la API falla o devuelve lista vacía, rompemos el bucle
-            if not data or isinstance(data, dict): 
-                break
-                
-            records = []
-            for k in data:
-                records.append({
-                    "timestamp": k[0],
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4]),
-                    "volume": float(k[5])
-                })
-                
-            df_gap = pl.DataFrame(records)
-            df_gap = df_gap.with_columns(pl.from_epoch("timestamp", time_unit="ms"))
+            data = requests.get(url).json()
+            if not data or isinstance(data, dict): break
+            records = [{"timestamp": k[0], "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])} for k in data]
+            df_gap = pl.DataFrame(records).with_columns(pl.from_epoch("timestamp", time_unit="ms"))
             df_gap.write_database(table_name="btc_usdt", connection=config.DB_URL, if_table_exists="append")
-            
-            fetched_count = len(df_gap)
-            total_filled += fetched_count
-            
-            # Actualizamos el puntero de tiempo para la siguiente petición (si son más de 1000 velas)
+            total_filled += len(df_gap)
             start_time = int(data[-1][0]) + 60000
-            
-            if fetched_count < 1000:
-                break # Ya atrapamos el presente
-
-        if total_filled > 0:
-            print(f"{GREEN}[✓] Brecha temporal curada: {total_filled} velas inyectadas en la Matrix.{RESET}")
-        else:
-            print(f"{GREEN}[✓] Sincronización verificada.{RESET}")
-
+            if len(df_gap) < 1000: break
+        print(f"{GREEN}[✓] Brecha temporal curada: {total_filled} velas inyectadas.{RESET}")
     except Exception as e:
         print(f"{RED}[!] Error crítico en Gap Filler: {e}{RESET}")
 
-
-def start_ingestor():
-    # EJECUTAMOS EL CURADOR TEMPORAL ANTES DE ABRIR LOS OJOS
+def start_ingestor(event_bus: Optional[EventBus] = None):
+    _ensure_bus(event_bus)
     sync_historical_gaps()
-    
     symbol = config.SYMBOL.replace("/", "").lower()
-    #socket = f"wss://stream.binance.com:9443/ws/{symbol}@kline_{config.TF_SNIPER}"
     socket = f"wss://fstream.binance.com/ws/{symbol}@kline_{config.TF_SNIPER}"
     ws = websocket.WebSocketApp(socket, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
     ws.run_forever()

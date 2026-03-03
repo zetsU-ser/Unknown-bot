@@ -1,78 +1,32 @@
+import json
 import os
-import numpy as np
 import xgboost as xgb
 from pathlib import Path
-from sklearn.metrics import classification_report, confusion_matrix, precision_score
+from sklearn.metrics import classification_report, precision_score
 from mlops.data_pipeline.feature_store import FeatureStore
 
-# ── CONFIGURACIÓN DE RUTAS ──
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MODEL_DIR = BASE_DIR / "mlops" / "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
-PARQUET_PATH = BASE_DIR / "research" / "blackbox_export.parquet"
+G, R, C, Y, B, RS = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[1m", "\033[0m"
 
 def train_juez_supremo():
-    print("\n\033[96m[+] Iniciando el Gimnasio: Entrenamiento del Juez Supremo (XGBoost)\033[0m")
+    print(f"\n{C}{B}MISION 2.2 -- ENTRENANDO JUEZ SUPREMO{RS}")
+    store = FeatureStore(str(BASE_DIR / "research" / "blackbox_export.parquet"))
+    X_train, X_test, y_train, y_test = store.prepare_data()
+    spw = (y_train == 0).sum() / max((y_train == 1).sum(), 1)
+    modelo = xgb.XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.03, scale_pos_weight=spw, eval_metric="logloss")
+    modelo.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     
-    # 1. Cargar el ADN
-    store = FeatureStore(str(PARQUET_PATH))
-    X_train, X_test, y_train, y_test = store.prepare_data(test_size=0.2)
-    
-    # 2. Calcular el Balance de Pesos (scale_pos_weight)
-    ceros = np.sum(y_train == 0)
-    unos  = np.sum(y_train == 1)
-    peso_balance = ceros / unos
-    print(f"[*] Desbalance detectado: Aplicando multiplicador de castigo a Unicornios: {peso_balance:.2f}x")
-    
-    # 3. Configurar la Bestia (XGBoost)
-    modelo = xgb.XGBClassifier(
-        n_estimators=100,          # Número de árboles de decisión
-        max_depth=3,               # Árboles poco profundos (evita memorizar el pasado)
-        learning_rate=0.05,        # Aprendizaje lento y seguro
-        scale_pos_weight=peso_balance, # Obliga a la IA a prestar atención a los Win
-        random_state=42,
-        eval_metric="logloss"
-    )
-    
-    # 4. Entrenar
-    print("[*] Entrenando la Red de Árboles... (Fuerza Bruta Matemática)")
-    modelo.fit(X_train, y_train)
-    
-    # 5. Evaluar con los datos del Futuro (Test Set Unseen)
-    print("\n\033[93m[+] Evaluando al Juez con Múltiples Umbrales de Letalidad:\033[0m")
-    
-    # En lugar de predecir 1 o 0, le pedimos el % exacto de seguridad que tiene la IA
-    probabilidades = modelo.predict_proba(X_test)[:, 1] 
-    
-    # Escaneamos desde el estándar 50% hasta el nivel de un francotirador 90%
-    umbrales = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90]
-    
-    mejor_umbral = 0.50
-    mejor_precision = 0.0
-    
-    for umbral in umbrales:
-        # Si la IA está más segura que el umbral, dispara (1), si no, aborta (0)
-        predicciones_umbral = (probabilidades >= umbral).astype(int)
-        
-        trades_aprobados = np.sum(predicciones_umbral)
-        
-        if trades_aprobados > 0:
-            precision = precision_score(y_test, predicciones_umbral, zero_division=0)
-            color = "\033[92m" if precision > 0.40 else "\033[91m"
-            print(f"[*] Umbral {umbral*100:.0f}% -> {color}Precisión: {precision*100:.1f}%\033[0m | Trades Disparados: {trades_aprobados}")
-            
-            if precision > mejor_precision:
-                mejor_precision = precision
-                mejor_umbral = umbral
-        else:
-            print(f"[*] Umbral {umbral*100:.0f}% -> Precisión: N/A | Trades Disparados: 0 (Demasiado exigente)")
+    probs = modelo.predict_proba(X_test)[:, 1]
+    best_u, best_p = 0.5, 0.0
+    for u in [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8]:
+        p = precision_score(y_test, (probs >= u).astype(int), zero_division=0)
+        if p > best_p: best_p, best_u = p, u
 
-    print(f"\n\033[96m[!] El punto dulce estadístico está en exigirle un {mejor_umbral*100:.0f}% de seguridad a la IA.\033[0m")
-
-    # 7. Guardar el Cerebro
-    model_path = MODEL_DIR / "meta_labeler.json"
-    modelo.save_model(model_path)
-    print(f"\n\033[96m[✓] Cerebro compilado y guardado en producción: {model_path}\033[0m")
+    print(f"{G}[+] Modelo entrenado. Mejor Precision: {best_p*100:.1f}% al umbral {best_u*100:.0f}%{RS}")
+    modelo.save_model(MODEL_DIR / "meta_labeler.json")
+    (MODEL_DIR / "meta_labeler_config.json").write_text(json.dumps({"threshold": best_u, "feature_names": store.get_feature_names()}, indent=2))
 
 if __name__ == "__main__":
     train_juez_supremo()

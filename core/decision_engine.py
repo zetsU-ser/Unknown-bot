@@ -1,188 +1,168 @@
-import os
-import polars as pl
-import numpy as np
-import math
-import datetime
+from __future__ import annotations
 
-import configs.btc_usdt_config as config
-from analysis.market_structure import get_full_market_ctx, detect_regime, detect_liquidity_sweep
-from analysis.volume_profile import detect_volume_divergence
-from core.risk_manager import compute_barriers
+import json
+import logging
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+from engine.event_bus import EventBus
+from domain.events import MTFDataEvent, SignalEvent
+from domain.trading import Signal
 from core.strategy_manager import StrategyManager
 
-# ── CARGA DEL JUEZ SUPREMO (LA IA) EN MEMORIA ──
-try:
-    import xgboost as xgb
-    MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mlops", "models", "meta_labeler.json")
-    _juez_supremo = xgb.XGBClassifier()
-    if os.path.exists(MODEL_PATH):
-        _juez_supremo.load_model(MODEL_PATH)
-    else:
-        _juez_supremo = None
-except ImportError:
-    _juez_supremo = None
+logger = logging.getLogger(__name__)
 
-_ctx_cache = {"ts_key": None, "ctx": None}
+BASE_DIR    = Path(__file__).resolve().parent.parent
+MODEL_DIR   = BASE_DIR / "mlops" / "models"
+MODEL_PATH  = MODEL_DIR / "meta_labeler.json"
+CONFIG_PATH = MODEL_DIR / "meta_labeler_config.json"
 
-def _get_ctx_cached(df_1m, df_15m, df_1h):
-    try:
-        ts_key = df_15m["timestamp"].to_list()[-1]
-    except Exception:
-        return None
 
-    if _ctx_cache.get("ts_key") == ts_key:
-        return _ctx_cache["ctx"]
-        
-    try:
-        ctx = get_full_market_ctx(df_1m, df_15m, df_1h)
-    except Exception as e:
-        print(f"\n\033[91m[CRÍTICO] Fallo interno en SMC Context: {e}\033[0m")
-        ctx = None
-        
-    _ctx_cache["ts_key"] = ts_key
-    _ctx_cache["ctx"]    = ctx
-    return ctx
+# ── META-LABELER FILTER (EL JUEZ SUPREMO) ─────────────────────────────────────
 
-def _build_ml_tensor(df_1m, df_15m, df_1h, df_4h, df_1d, entry_price, barriers, prob):
-    """
-    Reconstruye el ADN exacto (42 variables) en el milisegundo de la entrada 
-    para pasárselo a XGBoost, manteniendo el orden estricto de la Caja Negra.
-    """
-    c1m = df_1m.tail(1).to_dicts()[0]
-    c15m = df_15m.tail(1).to_dicts()[0]
-    c1h = df_1h.tail(1).to_dicts()[0]
-    c4h = df_4h.tail(1).to_dicts()[0]
-    c1d = df_1d.tail(1).to_dicts()[0]
-    
-    curr_p = c1m.get("close", entry_price)
-    vwap_1m = c1m.get("vwap", curr_p)
-    vwap_15m = c15m.get("vwap", curr_p)
-    ema_1h = c1h.get("ema_trend", curr_p)
-    ema_4h = c4h.get("ema_trend", curr_p)
-    ema_1d = c1d.get("ema_trend", curr_p)
-    
-    regime = detect_regime(df_15m)
-    sweep = detect_liquidity_sweep(df_1m)
-    vol_div = detect_volume_divergence(df_1m, lookback=10)
-    
-    def pct_dist(a, b): return ((a - b) / b * 100) if b and b != 0 else 0.0
-    
-    sl = barriers.get("sl", 0)
-    tp = barriers.get("tp", 0)
-    rr = barriers.get("rr", 0)
-    be_t = barriers.get("be_trigger", 0)
-    
-    risk_pct = abs(pct_dist(entry_price, sl))
-    be_dist_pct = abs(pct_dist(be_t, entry_price))
-    
-    div_map = {"BULL_DIV": 1, "BEAR_DIV": -1, "NORMAL": 0}
-    sweep_dir_map = {"BULL": 1, "BEAR": -1, None: 0}
-    trend_map = {"BULLISH": 1, "BEARISH": -1, "RANGING": 0}
-    zone_map  = {"PREMIUM": 1, "DISCOUNT": -1, "EQUILIBRIUM": 0}
-    
-    # Manejo robusto del tiempo para la IA
-    ts_val = c1m.get("timestamp")
-    if isinstance(ts_val, datetime.datetime):
-        hora_dia = ts_val.hour
-        dia_semana = ts_val.isoweekday() # 1=Lunes, 7=Domingo (Igual que Polars)
-    else:
-        ts_series = pl.Series([str(ts_val)]).str.to_datetime(strict=False)
-        hora_dia = ts_series.dt.hour()[0]
-        dia_semana = ts_series.dt.weekday()[0]
-        
-    tier = barriers.get("tier", "SCOUT")
-    default_mult = config.SCOUT_MULT if tier == "SCOUT" else (config.AMBUSH_MULT if tier == "AMBUSH" else config.UNICORN_MULT)
-    mult = barriers.get("mult", default_mult)
-    
-    features = [
-        entry_price, sl, tp, rr, risk_pct, be_t, be_dist_pct,
-        prob, mult,
-        c1m.get("rsi", np.nan), c1m.get("atr", np.nan), c1m.get("adx", np.nan), c1m.get("z_score", np.nan), c1m.get("vol_ratio", np.nan), c1m.get("cvd", np.nan), pct_dist(curr_p, vwap_1m), 1 if sweep["sweep"] else 0, sweep_dir_map.get(sweep.get("direction"), 0),
-        c15m.get("rsi", np.nan), c15m.get("atr", np.nan), c15m.get("adx", np.nan), c15m.get("cvd", np.nan), pct_dist(curr_p, vwap_15m), trend_map.get(regime.get("trend"), 0), zone_map.get(regime.get("zone"), 0),
-        c1h.get("rsi", np.nan), c1h.get("adx", np.nan), ema_1h, pct_dist(curr_p, ema_1h),
-        c4h.get("rsi", np.nan), c4h.get("atr", np.nan), c4h.get("adx", np.nan), ema_4h, pct_dist(curr_p, ema_4h),
-        c1d.get("rsi", np.nan), c1d.get("atr", np.nan), c1d.get("adx", np.nan), ema_1d, pct_dist(curr_p, ema_1d),
-        div_map.get(vol_div, 0),
-        hora_dia, dia_semana
-    ]
-    
-    return np.array([features], dtype=np.float32)
+class MetaLabelerFilter:
+    """Carga el XGBoost entrenado y filtra señales en tiempo real."""
 
-# ── INSTANCIAMOS EL DIRECTOR TÉCNICO ──
-strategy_manager = StrategyManager()
-_DIAG = {"n": 0, "shown": 0, "entries": 0}
+    def __init__(self) -> None:
+        self._model      = None
+        self._threshold  = 0.60
+        self._feat_names: list[str] = []
+        self._available  = False
+        self._load()
 
-def check_mtf_signals(df_1m, df_15m, df_1h, df_4h, df_1d, trade_state: dict = None):
-    _DIAG["n"] += 1
-    
-    if len(df_1m) < 100 or len(df_15m) < 30:
-        return _log_diag("WAIT", "WARMUP_DATAFRAMES", None, 0.0, "NONE")
+    def _load(self) -> None:
+        try:
+            import xgboost as xgb
+            if not MODEL_PATH.exists():
+                print(f"\033[93m[MetaLabeler] Modelo no encontrado en {MODEL_PATH} -> PASS-THROUGH\033[0m")
+                return
+            self._model = xgb.XGBClassifier()
+            self._model.load_model(str(MODEL_PATH))
+            if CONFIG_PATH.exists():
+                cfg = json.loads(CONFIG_PATH.read_text())
+                self._threshold  = cfg.get("threshold", 0.60)
+                self._feat_names = cfg.get("feature_names", [])
+                prec = cfg.get("precision_final", cfg.get("precision_at_thresh", 0.0))
+                print(f"\033[92m[MetaLabeler] Juez Supremo Cargado. Umbral={self._threshold:.2f} | Prec={prec * 100:.1f}%\033[0m")
+            self._available = True
+        except Exception as exc:
+            print(f"\033[91m[MetaLabeler] Error al cargar: {exc} -> PASS-THROUGH\033[0m")
 
-    c1m  = df_1m.tail(1).to_dicts()[0]
-    c1h  = df_1h.tail(1).to_dicts()[0]
-    c15m = df_15m.tail(1).to_dicts()[0]
-
-    ema_trend = c1h.get("ema_trend", 0.0)
-    entry_p   = c1m.get("close", 0) or 0
-
-    if ema_trend is None or math.isnan(ema_trend) or ema_trend == 0.0:
-        return _log_diag("WAIT", "WARMUP_MACRO_NAN", None, 0.0, "NONE")
-
-    direction = "LONG" if entry_p > ema_trend else "SHORT"
-
-    ctx = _get_ctx_cached(df_1m, df_15m, df_1h)
-    if ctx is None:
-        return _log_diag("WAIT", "CTX_FAIL_OR_CRASH", None, 0.0, direction)
-
-    atr_15m = c15m.get("atr") or 0
-    levels  = ctx.get("levels", {})
-
-    barriers = compute_barriers(
-        entry_price = entry_p,
-        atr_15m     = atr_15m,
-        direction   = direction,
-        nearest_res = levels.get("nearest_resistance"),
-        nearest_sup = levels.get("nearest_support")
-    )
-    
-    if not barriers:
-        return _log_diag("WAIT", "NO_BARRIERS_RR_TOO_LOW", None, 0.0, direction)
-
-    rr = barriers.get("rr", 0)
-    if rr < config.SCOUT_RR_MIN:
-        return _log_diag("WAIT", f"LOW_RR:{rr:.2f}", None, 0.0, direction)
-
-    # ── EVALUACIÓN BASE (LOS ORÁCULOS) ──
-    tier, prob = strategy_manager.evaluate_signal(c1m, c15m, c1h, direction, ctx, rr)
-    
-    if tier:
-        barriers["tier"] = tier
-        
-        # ── INTERVENCIÓN DE LA IA (EL JUEZ SUPREMO) ──
-        if _juez_supremo is not None:
-            X_tensor = _build_ml_tensor(df_1m, df_15m, df_1h, df_4h, df_1d, entry_p, barriers, prob)
-            prob_ia = _juez_supremo.predict_proba(X_tensor)[0][1]
+    def approve(self, signal: Signal, data: dict) -> bool:
+        """True = aprobar trade; False = bloquear."""
+        if not self._available or self._model is None:
+            return True
+        try:
+            vec = self._build_vector(signal, data)
+            if vec is None:
+                return True
             
-            if prob_ia < 0.70:
-                # El Juez Supremo deniega la operación
-                return _log_diag("WAIT", f"VETO_IA_70% (score={prob_ia*100:.1f}%)", None, 0.0, direction)
-            else:
-                # El Juez Supremo aprueba
-                return _log_diag("ENTRY", f"IA_APPROVED_{tier}:{prob_ia*100:.1f}%", barriers, prob, direction)
+            prob     = self._model.predict_proba(vec)[0, 1]
+            aprobado = bool(prob >= self._threshold)
+            
+            # Print visual en consola para ver a la IA trabajando
+            color = "\033[92m" if aprobado else "\033[91m"
+            estado = "APROBADO " if aprobado else "BLOQUEADO"
+            # print(f"  {color}[Juez ML] {estado} | {signal.tier} {signal.direction} | Confianza: {prob*100:.1f}% (Min: {self._threshold*100:.0f}%)\033[0m")
+            
+            return aprobado
+        except Exception as exc:
+            print(f"\033[91m[MetaLabeler] Error inferencia: {exc} -> pass-through\033[0m")
+            return True
 
-        # Si no hay IA cargada, dispara normal
-        return _log_diag("ENTRY", f"ZETZU_{direction[:1]}_{tier}:{prob:.1f}%", barriers, prob, direction)
+    def _build_vector(self, signal: Signal, data: dict) -> Optional[np.ndarray]:
+        candles: dict[str, dict] = {}
+        for tf in ("1m", "15m", "1h", "4h", "1d"):
+            df = data.get(tf)
+            if df is not None and len(df) > 0:
+                try:
+                    # Extracción O(1) del último elemento
+                    candles[tf] = {col: df[col][-1] for col in df.columns}
+                except Exception:
+                    pass
 
-    return _log_diag("WAIT", "LOW_PROB_ALL_TIERS", None, 0.0, direction)
+        flat: dict[str, float] = {
+            "entry_price"   : float(signal.entry_price),
+            "sl_price"      : float(signal.sl_price),
+            "tp_price"      : float(signal.tp_price),
+            "prob_bayesian" : float(signal.prob),
+            "rr_expected"   : (
+                abs(signal.tp_price - signal.entry_price)
+                / max(abs(signal.entry_price - signal.sl_price), 1e-9)
+            ),
+        }
+        for tf, candle in candles.items():
+            for col, val in candle.items():
+                try:
+                    # FIX ARQUITECTONICO: Formato exacto del DataPrep (ej: rsi_1m)
+                    flat[f"{col}_{tf}"] = float(val) if val is not None else 0.0
+                except (TypeError, ValueError):
+                    flat[f"{col}_{tf}"] = 0.0
 
-def _log_diag(signal, reason, barriers, prob, direction):
-    if signal == "ENTRY":
-        _DIAG["entries"] += 1
-    elif _DIAG["shown"] < 5 and reason not in ["WARMUP_DATAFRAMES", "WARMUP_MACRO_NAN"]:
-        _DIAG["shown"] += 1
-        print(f"\033[93m[DIAG #{_DIAG['shown']}] reason={reason} prob={prob:.1f}%\033[0m")
-        
-    if _DIAG["n"] == 500:
-        print(f"\033[96m[DIAG] 500 barras OK: {_DIAG['entries']} entradas detectadas.\033[0m")
-        
-    return signal, reason, barriers, prob, direction
+        if self._feat_names:
+            row = [flat.get(f, 0.0) for f in self._feat_names]
+        else:
+            fallback_keys = ["rsi", "adx", "atr", "cvd", "vwap", "vol_ratio"]
+            row = []
+            for tf in ("1m", "15m", "1h"):
+                candle = candles.get(tf, {})
+                for k in fallback_keys:
+                    row.append(float(candle.get(k, 0.0) or 0.0))
+            if not row:
+                return None
+
+        return np.array(row, dtype=np.float32).reshape(1, -1)
+
+    @property
+    def is_available(self) -> bool:
+        return self._available
+
+    @property
+    def threshold(self) -> float:
+        return self._threshold
+
+
+# ── DECISION ENGINE ───────────────────────────────────────────────────────────
+
+class DecisionEngine:
+    """
+    Recibe MTFDataEvent -> evalua oracles -> filtra con ML -> publica SignalEvent.
+    """
+
+    def __init__(self, event_bus: EventBus) -> None:
+        self.event_bus        = event_bus
+        self.strategy_manager = StrategyManager()
+        self.meta_filter      = MetaLabelerFilter()
+        self._total_signals   = 0
+        self._approved        = 0
+        self._blocked         = 0
+        self.event_bus.subscribe(MTFDataEvent, self.handle_mtf_data)
+
+    def handle_mtf_data(self, event: MTFDataEvent) -> None:
+        # 1. Evaluacion tecnica (3 oracles)
+        signal_obj = self.strategy_manager.evaluate_all(event.data)
+        if signal_obj is None:
+            return
+
+        self._total_signals += 1
+
+        # 2. Filtro ML: Juez Supremo
+        if self.meta_filter.approve(signal_obj, event.data):
+            self._approved += 1
+            self.event_bus.publish(SignalEvent(signal=signal_obj))
+        else:
+            self._blocked += 1
+
+    @property
+    def filter_stats(self) -> dict:
+        total = max(self._total_signals, 1)
+        return {
+            "total_signals" : self._total_signals,
+            "approved"      : self._approved,
+            "blocked"       : self._blocked,
+            "block_rate_pct": round(self._blocked / total * 100, 1),
+            "ml_available"  : self.meta_filter.is_available,
+            "threshold"     : self.meta_filter.threshold,
+        }

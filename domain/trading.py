@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 Direction = Literal["LONG", "SHORT"]
 Side = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET", "LIMIT"]
-OrderStatus = Literal["PENDING", "FILLED", "CANCELLED", "REJECTED"]
+OrderStatus = Literal["PENDING", "FILLED", "CANCELED", "REJECTED"]
 
 class Signal(BaseModel):
+    """Señal de trade (inmutable)."""
+
     asset: str
     direction: Direction
     entry_price: float
@@ -17,11 +19,13 @@ class Signal(BaseModel):
     tp_price: float
     tier: str
     prob: float
-    timestamp: int
+    timestamp: int = Field(..., description="Milisegundos Unix (int)")
 
     model_config = ConfigDict(frozen=True)
 
 class Order(BaseModel):
+    """Orden (inmutable; cambios se hacen vía model_copy(update=...))."""
+
     order_id: Optional[str] = None
     asset: str
     side: Side
@@ -32,10 +36,12 @@ class Order(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 class Position(BaseModel):
+    """Estado de posición (puede ser mutable según la capa de ejecución)."""
+
     asset: str
     side: Side
     entry_price: float
     qty: float
     unrealized_pnl: float
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict()

@@ -1,62 +1,41 @@
-import requests
-import configs.btc_usdt_config as config
-from infra.binance_client import BinanceClientFactory
+from __future__ import annotations
+
+from engine.event_bus import EventBus
+from domain.events import OrderEvent
+from core.interfaces.base_state import BaseStateManager
 
 # ── ESTÉTICA ─────────────────────────────────────────────────────────────────
 GREEN, RED, CYAN, YELLOW, RESET = "\033[92m", "\033[91m", "\033[96m", "\033[93m", "\033[0m"
 
-class ZetsuExecutor:
-    def __init__(self, use_testnet=True):
-        print(f"{CYAN}[*] Inicializando Brazo Ejecutor de Zetsu (Testnet: {use_testnet})...{RESET}")
-        self.exchange = BinanceClientFactory.create(testnet=use_testnet)
+class SimulatedExecutor:
+    """Ejecutor simulado: suscriptor de OrderEvent. Persiste órdenes en SQLite."""
+
+    def __init__(self, event_bus: EventBus, state_manager: BaseStateManager) -> None:
+        self.event_bus = event_bus
+        self.state_manager = state_manager
+        self.event_bus.subscribe(OrderEvent, self.handle_order)
+
+    def handle_order(self, event: OrderEvent) -> None:
         try:
-            self.exchange.load_markets()
-        except Exception as e:
-            print(f"{RED}[!] Aviso: No se pudieron cargar los mercados. {e}{RESET}")
+            fake_id = f"SIM-{int(event.timestamp.timestamp() * 1000)}"
+            filled_order = event.order.model_copy(update={"order_id": fake_id, "status": "FILLED"})
 
-    def calculate_position_size(self, entry_price, sl_price, usdt_balance):
-        risk_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.02)
-        capital_at_risk = usdt_balance * risk_pct
-        sl_distance = abs(entry_price - sl_price)
-        if sl_distance == 0: return 0
-        qty_btc = capital_at_risk / sl_distance
-        return round(qty_btc, 4)
+            # Persistencia (SQLite)
+            self.state_manager.save_active_order(filled_order)
 
-    def execute_signal(self, direction, entry_price, sl_price, tp_price, tier, prob=0.0):
-        print(f"\n{YELLOW}[⚙️] Zetsu está armando el paquete de ejecución institucional...{RESET}")
-        try:
-            balance = self.exchange.fetch_balance()
-            usdt_balance = balance['total'].get('USDT', 0.0)
-            
-            if usdt_balance < 10:
-                print(f"{RED}[X] Fuego Abortado: Balance insuficiente.{RESET}")
-                return False
-
-            qty = self.calculate_position_size(entry_price, sl_price, usdt_balance)
-            notional = qty * entry_price
-            
-            if notional < 5:
-                print(f"{RED}[X] Fuego Abortado: Tamaño de posición menor al mínimo.{RESET}")
-                return False
-
-            side = 'buy' if direction == 'LONG' else 'sell'
-            
-            # ── ALERTA DIRECTA A DISCORD (Ahora con % de Certeza) ──
-            discord_msg = {
-                "content": f"🚨 **ZETSU HUNT: TRADE DETECTADO** 🚨\n**Dirección:** {direction} | **Tier:** {tier} | **Certeza:** {prob:.1f}%\n```text\nEntry: {entry_price:,.2f}\nTP: {tp_price:,.2f}\nSL: {sl_price:,.2f}\n```"
-            }
-            
-            try:
-                if config.WEBHOOK_DISCORD:
-                    requests.post(config.WEBHOOK_DISCORD, json=discord_msg)
-                else:
-                    print(f"{YELLOW}[!] Alerta generada, pero no hay Webhook configurado en .env{RESET}")
-            except Exception as e:
-                print(f"{RED}[!] Error enviando a Discord: {e}{RESET}")
-
-            print(f"{GREEN}[✓] ORDEN ENVIADA - REVISA DISCORD{RESET}\n")
-            return True
+            print(
+                f"\n{GREEN}╔════════════════════════════════════════════════════════╗{RESET}\n"
+                f"{GREEN}║    ⚔️  ZETSU SIM EXECUTOR — ORDEN EJECUTADA (FILLED)     ║{RESET}\n"
+                f"{GREEN}╠════════════════════════════════════════════════════════╣{RESET}\n"
+                f"{CYAN}  order_id:{RESET} {filled_order.order_id}\n"
+                f"{CYAN}  asset:   {RESET} {filled_order.asset}\n"
+                f"{CYAN}  side:    {RESET} {filled_order.side}\n"
+                f"{CYAN}  type:    {RESET} {filled_order.order_type}\n"
+                f"{CYAN}  qty:     {RESET} {filled_order.qty}\n"
+                f"{CYAN}  status:  {RESET} {filled_order.status}\n"
+                f"{YELLOW}  SQLite:{RESET} guardada en StateManager (memoria inmortal)\n"
+                f"{GREEN}╚════════════════════════════════════════════════════════╝{RESET}\n"
+            )
 
         except Exception as e:
-            print(f"{RED}[!] Error Crítico de Ejecución: {e}{RESET}")
-            return False
+            print(f"{RED}[!] SimulatedExecutor error: {e}{RESET}")
