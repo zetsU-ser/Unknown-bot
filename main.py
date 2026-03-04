@@ -35,11 +35,11 @@ def run_backtest():
         print(f"\n{RED}[!] Simulación cancelada a la mitad.{RESET}")
 
 
-def run_download():
+def run_download() -> None:
     print(f"{CYAN}[*] Inicializando Extractor de Datos Históricos...{RESET}")
     try:
         import data.history_downloader
-        data.history_downloader.run()
+        data.history_downloader.download_historical_data()
     except Exception as e:
         print(f"\n{RED}[!] Error en descarga: {e}{RESET}")
 

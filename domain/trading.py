@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 Direction = Literal["LONG", "SHORT"]
 Side = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET", "LIMIT"]
-OrderStatus = Literal["PENDING", "FILLED", "CANCELED", "REJECTED"]
+OrderStatus = Literal["PENDING", "FILLED", "CANCELED", "REJECTED", "OPEN"]
 
 class Signal(BaseModel):
     """Señal de trade (inmutable)."""
@@ -26,12 +26,14 @@ class Signal(BaseModel):
 class Order(BaseModel):
     """Orden (inmutable; cambios se hacen vía model_copy(update=...))."""
 
-    order_id: Optional[str] = None
-    asset: str
-    side: Side
+    id: str
+    symbol: str
+    direction: str
     qty: float
-    order_type: OrderType
-    status: OrderStatus = "PENDING"
+    entry_price: float
+    status: str
+    sl_id: Optional[str] = None
+    tp_id: Optional[str] = None
 
     model_config = ConfigDict(frozen=True)
 

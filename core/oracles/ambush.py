@@ -1,13 +1,10 @@
 from __future__ import annotations
-
-import time
 from typing import Optional
-
 import configs.btc_usdt_config as config
 from core.interfaces.base_oracle import BaseOracle
 from domain.models import MarketContext
 from domain.trading import Signal
-
+import logging
 
 class AmbushOracle(BaseOracle):
     """
@@ -41,7 +38,6 @@ class AmbushOracle(BaseOracle):
     def tier(self) -> str:
         return "AMBUSH"
 
-    # ── PROHIBIDO TOCAR LA MATEMATICA ─────────────────────────────────────────
     def probability(
         self,
         c1m:       dict,
@@ -123,7 +119,7 @@ class AmbushOracle(BaseOracle):
             return None
 
         direction = data["direction"]
-        ctx       = data["ctx"]
+        ctx: MarketContext = data["ctx"]
         barriers  = data["barriers"]
         entry_p   = data["entry_p"]
 
@@ -137,8 +133,10 @@ class AmbushOracle(BaseOracle):
             from core.risk_manager import enrich_barriers_with_tier
             if enrich_barriers_with_tier(barriers, prob, direction, entry_p):
                 ts = c1m.get("timestamp")
-                if isinstance(ts, int):
-                    timestamp_ms = ts
+                
+                # AUDITORIA: Mismo fix general, sin fallas de Polars datetimes.
+                if isinstance(ts, (int, float)):
+                    timestamp_ms = int(ts)
                 elif hasattr(ts, "timestamp"):
                     timestamp_ms = int(ts.timestamp() * 1000)
                 else:

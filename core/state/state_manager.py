@@ -35,10 +35,11 @@ class SQLiteStateManager(BaseStateManager):
             raise RuntimeError(f"Failed to ensure schema: {e}") from e
 
     def save_active_order(self, order: Order) -> None:
-        if not order.order_id:
-            raise ValueError("Order.order_id is required to persist an active order.")
+        if not order.id:
+            raise ValueError("Order.id is required to persist an active order.")
 
         try:
+            # Al volcar el modelo, los nuevos campos sl_id y tp_id se guardarán automáticamente
             order_json = order.model_dump_json()
             cur = self.conn.cursor()
             cur.execute(
@@ -46,11 +47,11 @@ class SQLiteStateManager(BaseStateManager):
                 INSERT OR REPLACE INTO active_orders (order_id, asset, order_data)
                 VALUES (?, ?, ?)
                 """,
-                (order.order_id, order.asset, order_json),
+                (order.id, order.symbol, order_json),
             )
             self.conn.commit()
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to save active order {order.order_id}: {e}") from e
+            raise RuntimeError(f"Failed to save active order {order.id}: {e}") from e
 
     def load_active_orders(self) -> List[Order]:
         try:

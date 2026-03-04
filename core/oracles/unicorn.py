@@ -1,11 +1,10 @@
 from __future__ import annotations
-import time
 from typing import Optional
 import configs.btc_usdt_config as config
 from core.interfaces.base_oracle import BaseOracle
 from domain.models import MarketContext
 from domain.trading import Signal
-
+import logging
 
 class UnicornOracle(BaseOracle):
     def __init__(self):
@@ -36,7 +35,14 @@ class UnicornOracle(BaseOracle):
     def tier(self) -> str:
         return "UNICORN"
 
-    def probability(self, c1m, c15m, c1h, direction, ctx):
+    def probability(
+        self, 
+        c1m: dict, 
+        c15m: dict, 
+        c1h: dict, 
+        direction: str, 
+        ctx: MarketContext
+    ) -> float:
         has_choch   = (ctx.bos_choch.choch and
                        ctx.bos_choch.direction == ("BULL" if direction == "LONG" else "BEAR"))
         has_sfp_eql = (direction == "LONG"  and ctx.sweep.sweep and
@@ -108,13 +114,13 @@ class UnicornOracle(BaseOracle):
 
         return max(0.0, min(prob, 100.0))
 
-    def evaluate(self, data):
+    def evaluate(self, data: dict) -> Optional[Signal]:
         c1m, c15m, c1h = self._extract_candles(data)
         if not c1m or not c15m or not c1h:
             return None
 
         direction = data["direction"]
-        ctx       = data["ctx"]
+        ctx: MarketContext = data["ctx"]
         barriers  = data["barriers"]
         entry_p   = data["entry_p"]
 
@@ -127,11 +133,14 @@ class UnicornOracle(BaseOracle):
             from core.risk_manager import enrich_barriers_with_tier
             if enrich_barriers_with_tier(barriers, prob, direction, entry_p):
                 ts = c1m.get("timestamp")
-                if isinstance(ts, int):
-                    timestamp_ms = ts
+                
+                # AUDITORIA: Adaptador universal para tipos de tiempo
+                if isinstance(ts, (int, float)):
+                    timestamp_ms = int(ts)
                 elif hasattr(ts, "timestamp"):
                     timestamp_ms = int(ts.timestamp() * 1000)
                 else:
+                    import time
                     timestamp_ms = int(time.time() * 1000)
 
                 return Signal(

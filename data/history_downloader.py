@@ -7,9 +7,9 @@ from configs.btc_usdt_config import DB_URL, SYMBOL, TF_SNIPER
 # Si tienes un logger úsalo, si no, usaremos prints para ver el progreso
 # from core.logger import bot_log 
 
-def download_historical_data():
-    # Inicializamos Binance activando el Rate Limit nativo para que no nos baneen
-    exchange = ccxt.binance({
+def download_historical_data() -> None:
+    # Inicializamos Binance Futuros USD-M activando el Rate Limit nativo para que no nos baneen
+    exchange = ccxt.binanceusdm({
         'enableRateLimit': True,
     })
     all_ohlcv = []
@@ -18,7 +18,7 @@ def download_historical_data():
     # Descargamos desde el 1 de Enero de 2025 (Más de un año entero de velas 1m)
     since = exchange.parse8601('2025-01-01T00:00:00Z')
     
-    print(f"Iniciando descarga masiva de {SYMBOL} desde 2025...")
+    print(f"Iniciando descarga masiva de {SYMBOL} desde 2025 en Binance USD-M...")
 
     while since < exchange.milliseconds():
         try:
@@ -30,7 +30,7 @@ def download_historical_data():
                 
             all_ohlcv.extend(new_data)
             # Avanzamos el reloj al timestamp de la última vela + 1 milisegundo
-            since = new_data[-1][0] + 1
+            since = int(new_data[-1][0]) + 1
             
             print(f"[*] Descargadas {len(all_ohlcv)} velas...", end="\r")
             time.sleep(0.1) # Respeto al servidor de Binance

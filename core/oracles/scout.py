@@ -38,7 +38,6 @@ class ScoutOracle(BaseOracle):
     def tier(self) -> str:
         return "SCOUT"
 
-    # ── PROHIBIDO TOCAR LA MATEMATICA ─────────────────────────────────────────
     def probability(
         self,
         c1m:       dict,
@@ -114,8 +113,10 @@ class ScoutOracle(BaseOracle):
             from core.risk_manager import enrich_barriers_with_tier
             if enrich_barriers_with_tier(barriers, prob, direction, entry_p):
                 ts = c1m.get("timestamp")
-                if isinstance(ts, int):
-                    timestamp_ms = ts
+                
+                # AUDITORIA: Mismo fix universal de tiempo.
+                if isinstance(ts, (int, float)):
+                    timestamp_ms = int(ts)
                 elif hasattr(ts, "timestamp"):
                     timestamp_ms = int(ts.timestamp() * 1000)
                 else:

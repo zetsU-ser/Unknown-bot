@@ -60,7 +60,7 @@ class TradeBlackbox:
     # ─────────────────────────────────────────────────────────────────────────
     def capture_entry(
         self,
-        timestamp,
+        timestamp: int,
         entry_price: float,
         direction: str,
         barriers: dict,
@@ -69,8 +69,8 @@ class TradeBlackbox:
         df_1m: pl.DataFrame,
         df_15m: pl.DataFrame,
         df_1h: pl.DataFrame,
-        df_4h: pl.DataFrame, # <-- Inyectado
-        df_1d: pl.DataFrame, # <-- Inyectado
+        df_4h: pl.DataFrame,
+        df_1d: pl.DataFrame,
     ) -> int:
         """
         Fotografía instantánea del estado del mercado en el momento de entrada.
@@ -99,19 +99,19 @@ class TradeBlackbox:
         vol_div  = detect_volume_divergence(df_1m, lookback=10)
 
         # ── Distancias porcentuales normalizadas ──────────────────────────
-        def pct_dist(a, b):
-            return ((a - b) / b * 100) if b and b != 0 else np.nan
+        def pct_dist(a: float, b: float) -> float:
+            return float(((a - b) / b * 100) if b and b != 0 else np.nan)
 
-        sl   = barriers.get("sl", 0)
-        tp   = barriers.get("tp", 0)
-        rr   = barriers.get("rr", 0)
-        be_t = barriers.get("be_trigger", 0)
+        sl   = float(barriers.get("sl", 0.0))
+        tp   = float(barriers.get("tp", 0.0))
+        rr   = float(barriers.get("rr", 0.0))
+        be_t = float(barriers.get("be_trigger", 0.0))
 
         risk_pct    = abs(pct_dist(entry_price, sl))
         be_dist_pct = abs(pct_dist(be_t, entry_price))
 
         # ── Mapa a numérico ───────────────────────────────────────────────
-        div_map = {"BULL_DIV": 1, "BEAR_DIV": -1, "NORMAL": 0}
+        div_map = {"BULL_DIV": 1, "BEAR_DIV": -1, "NORMAL": 0, "NEUTRAL": 0}
         div_num = div_map.get(vol_div, 0)
 
         sweep_dir_map = {"BULL": 1, "BEAR": -1, None: 0}
@@ -147,7 +147,7 @@ class TradeBlackbox:
             "vol_ratio_1m":   c1m.get("vol_ratio", np.nan),
             "cvd_1m":         c1m.get("cvd",       np.nan),
             "vwap_dist_1m_pct": pct_dist(curr_p, vwap_1m),
-            "sweep_detected": 1 if sweep["sweep"] else 0,
+            "sweep_detected": 1 if sweep.get("sweep") else 0,
             "sweep_direction": sweep_dir,
 
             # ── Layer 15m: STRUCTURE ──────────────────────────────────────

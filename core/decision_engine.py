@@ -1,11 +1,15 @@
 from __future__ import annotations
-
+import os
 import json
+import pickle
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
 import numpy as np
+
+# Suprimir logs intrusivos de TensorFlow en consola
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 from engine.event_bus import EventBus
 from domain.events import MTFDataEvent, SignalEvent
@@ -16,119 +20,153 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR    = Path(__file__).resolve().parent.parent
 MODEL_DIR   = BASE_DIR / "mlops" / "models"
-MODEL_PATH  = MODEL_DIR / "meta_labeler.json"
-CONFIG_PATH = MODEL_DIR / "meta_labeler_config.json"
+MODEL_PATH  = MODEL_DIR / "meta_labeler_nn.keras"
+SCALER_PATH = MODEL_DIR / "scaler.pkl"
 
-
-# ── META-LABELER FILTER (EL JUEZ SUPREMO) ─────────────────────────────────────
+G, R, Y, B, RS = "\033[92m", "\033[91m", "\033[93m", "\033[1m", "\033[0m"
 
 class MetaLabelerFilter:
-    """Carga el XGBoost entrenado y filtra señales en tiempo real."""
+    """
+    Carga la Red Tri-Neuronal y filtra señales en tiempo real.
+    Implementa un patrón Singleton y reconstrucción exacta de tensores.
+    """
+    _instance = None
 
-    def __init__(self) -> None:
-        self._model      = None
-        self._threshold  = 0.60
-        self._feat_names: list[str] = []
-        self._available  = False
-        self._load()
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(MetaLabelerFilter, cls).__new__(cls)
+            cls._instance._model = None
+            cls._instance._scaler = None
+            cls._instance._threshold = 0.68
+            cls._instance._available = False
+            cls._instance._load()
+        return cls._instance
 
     def _load(self) -> None:
+        
+        if not MODEL_PATH.exists() or not SCALER_PATH.exists():
+            print(f"{Y}[MetaLabeler] Artefactos no encontrados en {MODEL_DIR} -> FALLBACK: Operando solo con Oráculos SMC{RS}")
+            return
         try:
-            import xgboost as xgb
-            if not MODEL_PATH.exists():
-                print(f"\033[93m[MetaLabeler] Modelo no encontrado en {MODEL_PATH} -> PASS-THROUGH\033[0m")
-                return
-            self._model = xgb.XGBClassifier()
-            self._model.load_model(str(MODEL_PATH))
-            if CONFIG_PATH.exists():
-                cfg = json.loads(CONFIG_PATH.read_text())
-                self._threshold  = cfg.get("threshold", 0.60)
-                self._feat_names = cfg.get("feature_names", [])
-                prec = cfg.get("precision_final", cfg.get("precision_at_thresh", 0.0))
-                print(f"\033[92m[MetaLabeler] Juez Supremo Cargado. Umbral={self._threshold:.2f} | Prec={prec * 100:.1f}%\033[0m")
+            import tensorflow as tf
+            self._model = tf.keras.models.load_model(str(MODEL_PATH))
+            with open(SCALER_PATH, "rb") as f:
+                self._scaler = pickle.load(f)
             self._available = True
-        except Exception as exc:
-            print(f"\033[91m[MetaLabeler] Error al cargar: {exc} -> PASS-THROUGH\033[0m")
+            print(f"{G}{B}[MetaLabeler] Red Tri-Neuronal y Scaler cargados en memoria. Juez Supremo ACTIVO.{RS}")
+        except Exception as e:
+            print(f"{R}[!] Error cargando Juez Supremo: {e} -> FALLBACK ACTIVADO{RS}")
+            self._available = False
 
     def approve(self, signal: Signal, data: dict) -> bool:
-        """True = aprobar trade; False = bloquear."""
-        if not self._available or self._model is None:
-            return True
+        if not self._available:
+            return True  # Fallback: Aprobación por defecto si no hay IA
+
         try:
-            vec = self._build_vector(signal, data)
-            if vec is None:
-                return True
+            # 1. Feature Engineering en vivo (Alineado milimétricamente)
+            features = self._build_feature_vector(signal, data)
             
-            prob     = self._model.predict_proba(vec)[0, 1]
-            aprobado = bool(prob >= self._threshold)
+            # 2. Normalización Z-Score estricta
+            features_scaled = self._scaler.transform(features)
             
-            # Print visual en consola para ver a la IA trabajando
-            color = "\033[92m" if aprobado else "\033[91m"
-            estado = "APROBADO " if aprobado else "BLOQUEADO"
-            # print(f"  {color}[Juez ML] {estado} | {signal.tier} {signal.direction} | Confianza: {prob*100:.1f}% (Min: {self._threshold*100:.0f}%)\033[0m")
+            # 3. Predicción (Inferencia Forward Pass)
+            prob = self._model.predict(features_scaled, verbose=0)[0][0]
+
+            # 4. Filtro de Decisión (SILENCIADO PARA ALTO RENDIMIENTO EN BACKTEST)
+            if prob < self._threshold:
+                # print(f"{R}[Juez Supremo] SEÑAL VETADA | Prob. Éxito: {prob:.2%} (Mínimo requerido: {self._threshold:.2%}){RS}")
+                return False
             
-            return aprobado
-        except Exception as exc:
-            print(f"\033[91m[MetaLabeler] Error inferencia: {exc} -> pass-through\033[0m")
+            # print(f"{G}[Juez Supremo] SEÑAL APROBADA | Prob. Éxito: {prob:.2%}{RS}")
             return True
 
-    def _build_vector(self, signal: Signal, data: dict) -> Optional[np.ndarray]:
-        candles: dict[str, dict] = {}
-        for tf in ("1m", "15m", "1h", "4h", "1d"):
-            df = data.get(tf)
-            if df is not None and len(df) > 0:
-                try:
-                    # Extracción O(1) del último elemento
-                    candles[tf] = {col: df[col][-1] for col in df.columns}
-                except Exception:
-                    pass
+        except Exception as e:
+            # Solo imprimimos errores críticos estructurales
+            print(f"{R}[!] Error crítico en Inferencia (Tensor desalineado): {e} -> Vetando por seguridad de capital{RS}")
+            return False
 
-        flat: dict[str, float] = {
-            "entry_price"   : float(signal.entry_price),
-            "sl_price"      : float(signal.sl_price),
-            "tp_price"      : float(signal.tp_price),
-            "prob_bayesian" : float(signal.prob),
-            "rr_expected"   : (
-                abs(signal.tp_price - signal.entry_price)
-                / max(abs(signal.entry_price - signal.sl_price), 1e-9)
-            ),
-        }
-        for tf, candle in candles.items():
-            for col, val in candle.items():
-                try:
-                    # FIX ARQUITECTONICO: Formato exacto del DataPrep (ej: rsi_1m)
-                    flat[f"{col}_{tf}"] = float(val) if val is not None else 0.0
-                except (TypeError, ValueError):
-                    flat[f"{col}_{tf}"] = 0.0
+    def _build_feature_vector(self, signal: Signal, data: dict) -> np.ndarray:
+        """
+        Reconstruye la instantánea del mercado incluyendo el tiempo real.
+        """
+        ctx  = data.get("ctx")
+        c1m  = data.get("df_1m").tail(1).to_dicts()[0]  if "df_1m"  in data and len(data["df_1m"])  > 0 else {}
+        c15m = data.get("df_15m").tail(1).to_dicts()[0] if "df_15m" in data and len(data["df_15m"]) > 0 else {}
+        c1h  = data.get("df_1h").tail(1).to_dicts()[0]  if "df_1h"  in data and len(data["df_1h"])  > 0 else {}
+        c4h  = data.get("df_4h").tail(1).to_dicts()[0]  if "df_4h"  in data and len(data["df_4h"])  > 0 else {}
+        c1d  = data.get("df_1d").tail(1).to_dicts()[0]  if "df_1d"  in data and len(data["df_1d"])  > 0 else {}
 
-        if self._feat_names:
-            row = [flat.get(f, 0.0) for f in self._feat_names]
-        else:
-            fallback_keys = ["rsi", "adx", "atr", "cvd", "vwap", "vol_ratio"]
-            row = []
-            for tf in ("1m", "15m", "1h"):
-                candle = candles.get(tf, {})
-                for k in fallback_keys:
-                    row.append(float(candle.get(k, 0.0) or 0.0))
-            if not row:
-                return None
+        curr_p = signal.entry_price
 
-        return np.array(row, dtype=np.float32).reshape(1, -1)
+        def pct_dist(a: float, b: float) -> float:
+            return float(((a - b) / b * 100) if b and b != 0 else 0.0)
 
-    @property
-    def is_available(self) -> bool:
-        return self._available
+        # Mapas categóricos
+        trend_map = {"BULLISH": 1, "BEARISH": -1, "RANGING": 0}
+        zone_map  = {"PREMIUM": 1, "DISCOUNT": -1, "EQUILIBRIUM": 0}
+        div_map   = {"BULL_DIV": 1, "BEAR_DIV": -1, "NORMAL": 0, "NEUTRAL": 0}
 
-    @property
-    def threshold(self) -> float:
-        return self._threshold
+        sl = float(signal.sl_price)
+        tp = float(signal.tp_price)
+        risk_pct = abs(pct_dist(curr_p, sl))
+        
+        # Extracción temporal exacta (Unix ms a hora/día)
+        dt = datetime.fromtimestamp(signal.timestamp / 1000.0)
+        hora_dia = dt.hour
+        dia_semana = dt.weekday()
 
+        vector = [
+            # -- Geometría
+            curr_p, sl, tp, 
+            abs((tp - curr_p) / (curr_p - sl)) if (curr_p - sl) != 0 else 0.0, 
+            risk_pct, 0.0, 0.0, signal.prob, 1.0, 
 
-# ── DECISION ENGINE ───────────────────────────────────────────────────────────
+            # -- Layer 1m
+            c1m.get("rsi", 0.0), c1m.get("atr", 0.0), c1m.get("adx", 0.0), 
+            c1m.get("z_score", 0.0), c1m.get("vol_ratio", 0.0), c1m.get("cvd", 0.0),
+            pct_dist(curr_p, c1m.get("vwap", curr_p)),
+            1 if c1m.get("sweep_detected") else 0,
+            c1m.get("sweep_direction", 0),
+
+            # -- Layer 15m
+            c15m.get("rsi", 0.0), c15m.get("atr", 0.0), c15m.get("adx", 0.0), c15m.get("cvd", 0.0),
+            pct_dist(curr_p, c15m.get("vwap", curr_p)),
+            trend_map.get(getattr(ctx, "trend_15m", "RANGING"), 0),
+            zone_map.get(getattr(ctx, "zone_15m", "EQUILIBRIUM"), 0),
+
+            # -- Layer 1h
+            c1h.get("rsi", 0.0), c1h.get("adx", 0.0),
+            c1h.get("ema_trend", curr_p), pct_dist(curr_p, c1h.get("ema_trend", curr_p)),
+
+            # -- Layer 4h
+            c4h.get("rsi", 0.0), c4h.get("atr", 0.0), c4h.get("adx", 0.0),
+            c4h.get("ema_trend", curr_p), pct_dist(curr_p, c4h.get("ema_trend", curr_p)),
+
+            # -- Layer 1d
+            c1d.get("rsi", 0.0), c1d.get("atr", 0.0), c1d.get("adx", 0.0),
+            c1d.get("ema_trend", curr_p), pct_dist(curr_p, c1d.get("ema_trend", curr_p)),
+
+            # -- Volume Intelligence
+            div_map.get(c1m.get("vol_divergence", "NEUTRAL"), 0),
+            
+            # -- Temporal Features
+            hora_dia,
+            dia_semana
+        ]
+        
+        arr = np.array(vector, dtype=float)
+
+        # Validación de integridad del tensor
+        if hasattr(self._scaler, 'feature_names_in_'):
+            expected_features = len(self._scaler.feature_names_in_)
+            if len(arr) != expected_features:
+                raise ValueError(f"Desfase de características. Esperadas: {expected_features}, Recibidas: {len(arr)}")
+
+        return arr.reshape(1, -1)
 
 class DecisionEngine:
     """
-    Recibe MTFDataEvent -> evalua oracles -> filtra con ML -> publica SignalEvent.
+    Recibe MTFDataEvent -> Evalúa Oráculos -> Filtra con ML -> Publica SignalEvent.
     """
 
     def __init__(self, event_bus: EventBus) -> None:
@@ -141,14 +179,12 @@ class DecisionEngine:
         self.event_bus.subscribe(MTFDataEvent, self.handle_mtf_data)
 
     def handle_mtf_data(self, event: MTFDataEvent) -> None:
-        # 1. Evaluacion tecnica (3 oracles)
         signal_obj = self.strategy_manager.evaluate_all(event.data)
         if signal_obj is None:
             return
 
         self._total_signals += 1
 
-        # 2. Filtro ML: Juez Supremo
         if self.meta_filter.approve(signal_obj, event.data):
             self._approved += 1
             self.event_bus.publish(SignalEvent(signal=signal_obj))
@@ -162,7 +198,5 @@ class DecisionEngine:
             "total_signals" : self._total_signals,
             "approved"      : self._approved,
             "blocked"       : self._blocked,
-            "block_rate_pct": round(self._blocked / total * 100, 1),
-            "ml_available"  : self.meta_filter.is_available,
-            "threshold"     : self.meta_filter.threshold,
+            "block_rate_pct": round(self._blocked / total * 100, 2)
         }

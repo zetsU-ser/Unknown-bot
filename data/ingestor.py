@@ -1,10 +1,13 @@
+
 import json
+import threading
+import warnings
+import logging
 import websocket
 import datetime
 import polars as pl
 import requests
 import sys
-import io
 from typing import Optional
 
 # ── IMPORTACIONES LIMPIAS ────────────────────────────────────────────────────
@@ -110,53 +113,73 @@ def _ensure_bus(event_bus: Optional[EventBus] = None) -> EventBus:
     _bus.subscribe(OrderEvent, _handle_order_event)
     return _bus
 
-def evaluate_live_market():
+def _async_db_write_and_eval(df: pl.DataFrame, db_url: str) -> None:
+    """Ejecuta la escritura I/O y la evaluación en un hilo separado para no bloquear el WS."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df.write_database(table_name="btc_usdt", connection=db_url, if_table_exists="append")
+        
+        evaluate_live_market()
+    except Exception as e:
+        state.is_first_render = True
+        logging.error(f"\n{RED}[!] Error crítico inyectando a la base de datos: {e}{RESET}")
+
+def evaluate_live_market() -> None:
     global _current_eval_data, _bus
     try:
-        suppress_text = io.StringIO()
-        sys.stdout = suppress_text
-
-        df_1m = pl.read_database_uri("SELECT * FROM btc_usdt ORDER BY timestamp ASC", uri=config.DB_URL)
+        # FASE 3 FIX AUDITADO: LIMIT 100000 (~69 días de datos a 1m).
+        # Esto previene el OOM de la consulta libre, pero garantiza suficiente historia
+        # para que los indicadores de los timeframes mayores (4h, 1d) tengan con qué calcularse.
+        query = """
+            SELECT * FROM (
+                SELECT * FROM btc_usdt ORDER BY timestamp DESC LIMIT 100000
+            ) sub ORDER BY timestamp ASC
+        """
+        df_1m = pl.read_database_uri(query, uri=config.DB_URL)
         df_1m = df_1m.unique(subset=["timestamp"], keep="last").sort("timestamp")
-        df_1m = add_indicators(df_1m)
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df_1m = add_indicators(df_1m)
 
-        df_15m = df_1m.group_by_dynamic("timestamp", every="15m").agg([
-            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
-            pl.col("close").last(), pl.col("volume").sum()
-        ])
-        df_15m = add_indicators(df_15m)
+            df_15m = df_1m.group_by_dynamic("timestamp", every="15m").agg([
+                pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
+                pl.col("close").last(), pl.col("volume").sum()
+            ])
+            df_15m = add_indicators(df_15m)
 
-        df_1h = df_1m.group_by_dynamic("timestamp", every="1h").agg([
-            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
-            pl.col("close").last(), pl.col("volume").sum()
-        ])
-        df_1h = add_indicators(df_1h)
+            df_1h = df_1m.group_by_dynamic("timestamp", every="1h").agg([
+                pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
+                pl.col("close").last(), pl.col("volume").sum()
+            ])
+            df_1h = add_indicators(df_1h)
 
-        df_4h = df_1m.group_by_dynamic("timestamp", every="4h").agg([
-            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
-            pl.col("close").last(), pl.col("volume").sum()
-        ])
-        df_4h = add_indicators(df_4h)
+            df_4h = df_1m.group_by_dynamic("timestamp", every="4h").agg([
+                pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
+                pl.col("close").last(), pl.col("volume").sum()
+            ])
+            df_4h = add_indicators(df_4h)
 
-        df_1d = df_1m.group_by_dynamic("timestamp", every="1d").agg([
-            pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
-            pl.col("close").last(), pl.col("volume").sum()
-        ])
-        df_1d = add_indicators(df_1d)
+            df_1d = df_1m.group_by_dynamic("timestamp", every="1d").agg([
+                pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
+                pl.col("close").last(), pl.col("volume").sum()
+            ])
+            df_1d = add_indicators(df_1d)
 
-        df_1m  = enrich_with_volume_features(df_1m)
-        df_15m = enrich_with_volume_features(df_15m)
-        df_1h  = enrich_with_volume_features(df_1h)
-        df_4h  = enrich_with_volume_features(df_4h)
-        df_1d  = enrich_with_volume_features(df_1d)
+            df_1m  = enrich_with_volume_features(df_1m)
+            df_15m = enrich_with_volume_features(df_15m)
+            df_1h  = enrich_with_volume_features(df_1h)
+            df_4h  = enrich_with_volume_features(df_4h)
+            df_1d  = enrich_with_volume_features(df_1d)
 
+        # Ahora los .tail() tienen suficientes filas para no fallar
         slice_1m  = df_1m.tail(150)
         slice_15m = df_15m.tail(120)
         slice_1h  = df_1h.tail(49)
         slice_4h  = df_4h.tail(25)
         slice_1d  = df_1d.tail(15)
 
-        sys.stdout = sys.__stdout__
         if _bus is None:
             _bus = _ensure_bus()
 
@@ -169,43 +192,44 @@ def evaluate_live_market():
         _bus.publish(MTFDataEvent(data=data_payload))
         _current_eval_data = None
 
-        state.last_reason = "NO_TRADE"
+        if state.last_reason == "Sincronizando con la Matrix...":
+            state.last_reason = "Analizando mercado (Esperando setup)..."
+            
         state.candles_analyzed += 1
 
     except Exception as e:
-        sys.stdout = sys.__stdout__
         state.is_first_render = True
         _current_eval_data = None
-        print(f"\n{RED}[!] Error crítico en el análisis en vivo: {e}{RESET}")
+        logging.error(f"\n{RED}[!] Error crítico en el análisis en vivo: {e}{RESET}")
 
-def on_message(ws, message):
+
+def on_message(ws: websocket.WebSocketApp, message: str) -> None:
     data = json.loads(message)
-    kline = data['k']
+    kline = data.get('k')
+    if not kline:
+        return
+        
     is_closed = kline['x']
     state.current_price = float(kline['c'])
 
     if is_closed:
         state.last_close = state.current_price
-        timestamp_ms = data['E']
-        open_p, high_p, low_p, close_p, volume = float(kline['o']), float(kline['h']), float(kline['l']), float(kline['c']), float(kline['v'])
-
+        
         df_new = pl.DataFrame({
-            "timestamp": [timestamp_ms],
-            "open": [open_p], "high": [high_p], "low": [low_p], "close": [close_p], "volume": [volume]
+            "timestamp": [int(kline['t'])],
+            "open":  [float(kline['o'])], 
+            "high":  [float(kline['h'])], 
+            "low":   [float(kline['l'])], 
+            "close": [float(kline['c'])], 
+            "volume": [float(kline['v'])]
         })
         df_new = df_new.with_columns(pl.from_epoch("timestamp", time_unit="ms"))
 
-        try:
-            suppress_text = io.StringIO()
-            sys.stdout = suppress_text
-            df_new.write_database(table_name="btc_usdt", connection=config.DB_URL, if_table_exists="append")
-            sys.stdout = sys.__stdout__
-            evaluate_live_market()
-        except Exception as e:
-            sys.stdout = sys.__stdout__
-            state.is_first_render = True
-            print(f"\n{RED}[!] Error crítico inyectando a la base de datos: {e}{RESET}")
-    render_dashboard()
+        threading.Thread(
+            target=_async_db_write_and_eval, 
+            args=(df_new, config.DB_URL), 
+            daemon=True
+        ).start()
 
 def on_error(ws, error):
     state.is_first_render = True

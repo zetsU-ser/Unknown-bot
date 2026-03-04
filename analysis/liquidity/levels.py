@@ -1,10 +1,13 @@
 import polars as pl
+from typing import Dict, Any, List
 from analysis.structure.fractals import find_swing_highs_lows
 from analysis.liquidity.fvg import detect_fvg
 
-def find_key_levels(df: pl.DataFrame, lookback: int = 150) -> dict:
+def find_key_levels(df: pl.DataFrame, lookback: int = 150) -> Dict[str, Any]:
+    """Sincroniza niveles de Order Blocks mitigados y Fractales."""
     if len(df) < 20:
         return {"nearest_resistance": None, "nearest_support": None, "bullish_obs": [], "bearish_obs": []}
+        
     actual_lb = min(lookback, len(df))
     subset = df.tail(actual_lb)
     opens  = subset["open"].to_numpy()
@@ -14,14 +17,15 @@ def find_key_levels(df: pl.DataFrame, lookback: int = 150) -> dict:
     curr_p = closes[-1]
 
     fvgs = detect_fvg(df, lookback=actual_lb)
-    bullish_obs, bearish_obs = [], []
+    bullish_obs: List[Dict[str, Any]] = []
+    bearish_obs: List[Dict[str, Any]] = []
 
     for bisi in fvgs["bisi"]:
         fi = bisi.get("idx", 0)
         fi = min(fi, len(closes) - 2)
         for j in range(fi - 1, max(0, fi - 10), -1):
             if closes[j] < opens[j]:
-                bullish_obs.append({"top": highs[j], "bottom": lows[j], "recency": len(closes) - fi})
+                bullish_obs.append({"top": float(highs[j]), "bottom": float(lows[j]), "recency": len(closes) - fi})
                 break
 
     for sibi in fvgs["sibi"]:
@@ -29,7 +33,7 @@ def find_key_levels(df: pl.DataFrame, lookback: int = 150) -> dict:
         fi = min(fi, len(closes) - 2)
         for j in range(fi - 1, max(0, fi - 10), -1):
             if closes[j] > opens[j]:
-                bearish_obs.append({"top": highs[j], "bottom": lows[j], "recency": len(closes) - fi})
+                bearish_obs.append({"top": float(highs[j]), "bottom": float(lows[j]), "recency": len(closes) - fi})
                 break
 
     sh_idx, sl_idx = find_swing_highs_lows(highs, lows, n=5)
@@ -40,24 +44,29 @@ def find_key_levels(df: pl.DataFrame, lookback: int = 150) -> dict:
     valid_res_ob = [ob["bottom"] for ob in bearish_obs if ob["bottom"] > curr_p]
 
     return {
-        "nearest_resistance": min(valid_res_ob) if valid_res_ob else (min(resists) if resists else None),
-        "nearest_support":    max(valid_sup_ob) if valid_sup_ob else (max(supps)   if supps   else None),
+        "nearest_resistance": float(min(valid_res_ob)) if valid_res_ob else (float(min(resists)) if resists else None),
+        "nearest_support":    float(max(valid_sup_ob)) if valid_sup_ob else (float(max(supps))   if supps   else None),
         "bullish_obs": bullish_obs, "bearish_obs": bearish_obs,
     }
 
-def detect_ob_proximity(curr_p: float, levels: dict, tolerance_pct: float = 0.003) -> dict:
+def detect_ob_proximity(curr_p: float, levels: Dict[str, Any], tolerance_pct: float = 0.003) -> Dict[str, Any]:
     tolerance = curr_p * tolerance_pct
+    
     for ob in levels.get("bullish_obs", []):
         if ob["bottom"] - tolerance <= curr_p <= ob["top"] + tolerance:
             dist = abs(curr_p - (ob["top"] + ob["bottom"]) / 2) / curr_p
-            return {"touching": True, "type": "bullish", "ob": ob, "dist_pct": dist}
+            return {"touching": True, "type": "bullish", "ob": ob, "dist_pct": float(dist)}
+            
     for ob in levels.get("bearish_obs", []):
         if ob["bottom"] - tolerance <= curr_p <= ob["top"] + tolerance:
             dist = abs(curr_p - (ob["top"] + ob["bottom"]) / 2) / curr_p
-            return {"touching": True, "type": "bearish", "ob": ob, "dist_pct": dist}
+            return {"touching": True, "type": "bearish", "ob": ob, "dist_pct": float(dist)}
+            
     min_dist = 1.0
     for ob in levels.get("bullish_obs", []) + levels.get("bearish_obs", []):
         mid = (ob["top"] + ob["bottom"]) / 2
         d   = abs(curr_p - mid) / curr_p
-        if d < min_dist: min_dist = d
-    return {"touching": False, "type": None, "ob": None, "dist_pct": min_dist}
+        if d < min_dist: 
+            min_dist = d
+            
+    return {"touching": False, "type": None, "ob": None, "dist_pct": float(min_dist)}

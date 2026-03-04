@@ -221,18 +221,20 @@ def run_simulation(df_1m, df_15m, df_1h, df_4h, df_1d):
         slice_1d  = df_1d.slice(max(0, i1d - 14),   15)
 
         collector.reset()
+        
+        # FIX DE AUDITORÍA: El Payload ahora envía las llaves retrocompatibles y las esperadas por MLOps
         bus.publish(MTFDataEvent(data={
             "1m": slice_1m, "15m": slice_15m, "1h": slice_1h,
-            "4h": slice_4h, "1d": slice_1d,   "trade_state": wallet,
+            "4h": slice_4h, "1d": slice_1d,
+            "df_1m": slice_1m, "df_15m": slice_15m, "df_1h": slice_1h,
+            "df_4h": slice_4h, "df_1d": slice_1d,
+            "trade_state": wallet,
         }))
 
         sig = collector.last_signal
         if sig is None:
             continue
 
-        # FIX ARQUITECTONICO: Pydantic v2 clona el dict al construir MTFDataEvent.
-        # data_payload["barriers"] jamas recibe el valor de strategy_manager.
-        # Se reconstruye barriers desde el Signal inmutable (sl/tp/entry_price).
         entry  = float(sig.entry_price)
         sl_p   = float(sig.sl_price)
         tp_p   = float(sig.tp_price)
@@ -249,8 +251,8 @@ def run_simulation(df_1m, df_15m, df_1h, df_4h, df_1d):
             "mult":           1.0,
             "max_bars":       config.MAX_TRADE_BARS,
             "prob_min":       config.SCOUT_PROB_MIN,
-            "be_trigger":     tp_p,    # sobrescrito por _enrich_barriers_by_tier
-            "profit_lock_sl": entry,   # sobrescrito por _enrich_barriers_by_tier
+            "be_trigger":     tp_p,    
+            "profit_lock_sl": entry,   
         }
 
         _enrich_barriers_by_tier(barriers, sig.tier, sig.direction, entry)
@@ -303,7 +305,6 @@ def print_fancy_report(trades, final_cap, blackbox=None):
 
     exits = Counter([t.get("reason", "?") for t in trades])
 
-    # Drawdown maximo
     initial_cash = getattr(config, "INITIAL_CASH", 10000.0)
     equity = initial_cash
     peak_eq = initial_cash
@@ -314,7 +315,6 @@ def print_fancy_report(trades, final_cap, blackbox=None):
         dd       = (peak_eq - equity) / peak_eq * 100
         max_dd   = max(max_dd, dd)
 
-    # Sharpe simplificado
     pnls    = [t["pnl"] for t in trades]
     std_pnl = statistics.stdev(pnls) if len(pnls) > 1 else 1e-9
     sharpe  = (avg_pnl / std_pnl) * (len(pnls) ** 0.5) if std_pnl > 0 else 0.0
